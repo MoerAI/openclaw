@@ -150,7 +150,6 @@ describe("discoverOpenClawPlugins", () => {
     expect(ids).toContain("voice-call");
   });
 
-
   it("strips openclaw- prefix from unscoped package names", async () => {
     const stateDir = makeTempDir();
     const globalExt = path.join(stateDir, "extensions", "openclaw-groupme");
