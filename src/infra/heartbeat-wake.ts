@@ -29,7 +29,6 @@ let handlerGeneration = 0;
 const pendingWakes = new Map<string, PendingWakeReason>();
 let scheduled = false;
 let running = false;
-let lastRunStartedMs = 0;
 let timer: NodeJS.Timeout | null = null;
 let timerDueAt: number | null = null;
 let timerKind: WakeTimerKind | null = null;
@@ -145,7 +144,6 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
 
     const pendingBatch = Array.from(pendingWakes.values());
     pendingWakes.clear();
-    lastRunStartedMs = Date.now();
     running = true;
     try {
       for (const pendingWake of pendingBatch) {
@@ -216,7 +214,6 @@ export function setHeartbeatWakeHandler(next: HeartbeatWakeHandler | null): () =
     // `scheduled === true` can cause spurious immediate re-runs.
     running = false;
     scheduled = false;
-    lastRunStartedMs = 0;
   }
   if (handler && pendingWakes.size > 0) {
     schedule(DEFAULT_COALESCE_MS, "normal");
@@ -265,7 +262,6 @@ export function resetHeartbeatWakeStateForTests() {
   pendingWakes.clear();
   scheduled = false;
   running = false;
-  lastRunStartedMs = 0;
   handlerGeneration += 1;
   handler = null;
 }
