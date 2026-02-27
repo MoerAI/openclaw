@@ -370,9 +370,7 @@ describe("sanitizeToolCallInputs", () => {
       { role: "user", content: "next" },
       {
         role: "assistant",
-        content: [
-          { type: "text", text: "last response" },
-        ],
+        content: [{ type: "text", text: "last response" }],
       },
     ] as unknown as AgentMessage[];
 

@@ -147,10 +147,13 @@ export function repairToolCallInputs(
   }
   const skipLastAssistant =
     lastAssistantIdx >= 0 &&
-    Array.isArray((messages[lastAssistantIdx] as Extract<AgentMessage, { role: "assistant" }>).content) &&
+    Array.isArray(
+      (messages[lastAssistantIdx] as Extract<AgentMessage, { role: "assistant" }>).content,
+    ) &&
     (messages[lastAssistantIdx] as Extract<AgentMessage, { role: "assistant" }>).content.some(
       (block) => {
-        const t = block && typeof block === "object" ? (block as { type?: unknown }).type : undefined;
+        const t =
+          block && typeof block === "object" ? (block as { type?: unknown }).type : undefined;
         return t === "thinking" || t === "redacted_thinking";
       },
     );
