@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { InputFileLimits } from "./input-files.js";
 
 const fetchWithSsrFGuardMock = vi.fn();
 
@@ -97,6 +98,7 @@ describe("base64 size guards", () => {
             maxChars: 100,
             maxRedirects: 0,
             timeoutMs: 1,
+            pdfTimeoutMs: 60_000,
             pdf: { maxPages: 1, maxPixels: 1, minTextChars: 1 },
           },
         });
@@ -150,5 +152,82 @@ describe("input image base64 validation", () => {
       },
     );
     expect(image.data).toBe("aGVsbG8=");
+  });
+});
+
+describe("PDF extraction error handling", () => {
+  function makePdfLimits(overrides?: Partial<InputFileLimits>): InputFileLimits {
+    return {
+      allowUrl: false,
+      allowedMimes: new Set(["application/pdf"]),
+      maxBytes: 50 * 1024 * 1024,
+      maxChars: 200_000,
+      maxRedirects: 0,
+      timeoutMs: 10_000,
+      pdfTimeoutMs: 60_000,
+      pdf: { maxPages: 4, maxPixels: 4_000_000, minTextChars: 200 },
+      ...overrides,
+    };
+  }
+
+  it("returns graceful error when PDF extraction times out", async () => {
+    // Use a very short timeout to trigger the timeout path
+    const limits = makePdfLimits({ pdfTimeoutMs: 1 });
+
+    // Create a minimal (invalid) PDF buffer that will cause pdfjs to hang or fail
+    const fakePdfBuffer = Buffer.from("%PDF-1.4 fake content that is not a real PDF");
+
+    const result = await extractFileContentFromSource({
+      source: {
+        type: "base64",
+        data: fakePdfBuffer.toString("base64"),
+        mediaType: "application/pdf",
+        filename: "test.pdf",
+      },
+      limits,
+    });
+
+    // Should return a result (not throw), with an error message in text
+    expect(result.filename).toBe("test.pdf");
+    expect(result.text).toMatch(/PDF processing failed/);
+  });
+
+  it("returns graceful error when PDF buffer is malformed", async () => {
+    const limits = makePdfLimits({ pdfTimeoutMs: 5_000 });
+    const garbageBuffer = Buffer.from("this is not a PDF at all");
+
+    const result = await extractFileContentFromSource({
+      source: {
+        type: "base64",
+        data: garbageBuffer.toString("base64"),
+        mediaType: "application/pdf",
+        filename: "garbage.pdf",
+      },
+      limits,
+    });
+
+    expect(result.filename).toBe("garbage.pdf");
+    expect(result.text).toMatch(/PDF processing failed/);
+  });
+
+  it("does not hang the session on PDF failure", async () => {
+    const limits = makePdfLimits({ pdfTimeoutMs: 500 });
+    const fakePdfBuffer = Buffer.from("%PDF-1.4 incomplete");
+
+    const start = Date.now();
+    const result = await extractFileContentFromSource({
+      source: {
+        type: "base64",
+        data: fakePdfBuffer.toString("base64"),
+        mediaType: "application/pdf",
+        filename: "slow.pdf",
+      },
+      limits,
+    });
+    const elapsed = Date.now() - start;
+
+    // Should complete within the timeout window (with some margin)
+    expect(elapsed).toBeLessThan(5_000);
+    expect(result.text).toMatch(/PDF processing failed/);
   });
 });

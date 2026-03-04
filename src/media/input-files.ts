@@ -61,6 +61,7 @@ export type InputFileLimits = {
   maxChars: number;
   maxRedirects: number;
   timeoutMs: number;
+  pdfTimeoutMs: number;
   pdf: InputPdfLimits;
 };
 
@@ -71,6 +72,7 @@ export type InputFileLimitsConfig = {
   maxChars?: number;
   maxRedirects?: number;
   timeoutMs?: number;
+  pdfTimeoutMs?: number;
   pdf?: {
     maxPages?: number;
     maxPixels?: number;
@@ -125,6 +127,7 @@ export const DEFAULT_INPUT_TIMEOUT_MS = 10_000;
 export const DEFAULT_INPUT_PDF_MAX_PAGES = 4;
 export const DEFAULT_INPUT_PDF_MAX_PIXELS = 4_000_000;
 export const DEFAULT_INPUT_PDF_MIN_TEXT_CHARS = 200;
+export const DEFAULT_PDF_PROCESSING_TIMEOUT_MS = 60_000;
 
 function rejectOversizedBase64Payload(params: {
   data: string;
@@ -176,6 +179,7 @@ export function resolveInputFileLimits(config?: InputFileLimitsConfig): InputFil
     maxChars: config?.maxChars ?? DEFAULT_INPUT_FILE_MAX_CHARS,
     maxRedirects: config?.maxRedirects ?? DEFAULT_INPUT_MAX_REDIRECTS,
     timeoutMs: config?.timeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS,
+    pdfTimeoutMs: config?.pdfTimeoutMs ?? DEFAULT_PDF_PROCESSING_TIMEOUT_MS,
     pdf: {
       maxPages: config?.pdf?.maxPages ?? DEFAULT_INPUT_PDF_MAX_PAGES,
       maxPixels: config?.pdf?.maxPixels ?? DEFAULT_INPUT_PDF_MAX_PIXELS,
@@ -241,7 +245,7 @@ function clampText(text: string, maxChars: number): string {
   return text.slice(0, maxChars);
 }
 
-async function extractPdfContent(params: {
+async function extractPdfContentInner(params: {
   buffer: Buffer;
   limits: InputFileLimits;
 }): Promise<{ text: string; images: InputImageContent[] }> {
@@ -298,6 +302,23 @@ async function extractPdfContent(params: {
   }
 
   return { text, images };
+}
+
+// Wraps PDF extraction with a timeout to prevent hangs on large/malformed PDFs.
+async function extractPdfContent(params: {
+  buffer: Buffer;
+  limits: InputFileLimits;
+}): Promise<{ text: string; images: InputImageContent[] }> {
+  const timeoutMs = params.limits.pdfTimeoutMs;
+  return Promise.race([
+    extractPdfContentInner(params),
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`PDF processing timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      ),
+    ),
+  ]);
 }
 
 export async function extractImageContentFromSource(
@@ -409,13 +430,19 @@ export async function extractFileContentFromSource(params: {
   }
 
   if (mimeType === "application/pdf") {
-    const extracted = await extractPdfContent({ buffer, limits });
-    const text = extracted.text ? clampText(extracted.text, limits.maxChars) : "";
-    return {
-      filename,
-      text,
-      images: extracted.images.length > 0 ? extracted.images : undefined,
-    };
+    try {
+      const extracted = await extractPdfContent({ buffer, limits });
+      const text = extracted.text ? clampText(extracted.text, limits.maxChars) : "";
+      return {
+        filename,
+        text,
+        images: extracted.images.length > 0 ? extracted.images : undefined,
+      };
+    } catch (err) {
+      logWarn(`media: PDF extraction failed: ${String(err)}`);
+      const message = err instanceof Error ? err.message : "unknown error";
+      return { filename, text: `[PDF processing failed: ${message}]` };
+    }
   }
 
   const text = clampText(decodeTextContent(buffer, charset), limits.maxChars);
