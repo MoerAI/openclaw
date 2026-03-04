@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
-import { withEnvAsync } from "../test-utils/env.js";
+
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import { buildDeviceAuthPayload } from "./device-auth.js";
 import { ConnectErrorDetailCodes } from "./protocol/connect-error-details.js";
@@ -84,12 +84,6 @@ function restoreGatewayToken(prevToken: string | undefined) {
   }
 }
 
-async function withRuntimeVersionEnv<T>(
-  env: Record<string, string | undefined>,
-  run: () => Promise<T>,
-): Promise<T> {
-  return withEnvAsync(env, run);
-}
 
 const TEST_OPERATOR_CLIENT = {
   id: GATEWAY_CLIENT_NAMES.TEST,
@@ -333,37 +327,11 @@ describe("gateway server auth/connect", () => {
       ws.close();
     });
 
-    test("connect (req) handshake resolves server version from env precedence", async () => {
-      for (const testCase of [
-        {
-          env: {
-            OPENCLAW_VERSION: " ",
-            OPENCLAW_SERVICE_VERSION: "2.4.6-service",
-            npm_package_version: "1.0.0-package",
-          },
-          expectedVersion: "2.4.6-service",
-        },
-        {
-          env: {
-            OPENCLAW_VERSION: "9.9.9-cli",
-            OPENCLAW_SERVICE_VERSION: "2.4.6-service",
-            npm_package_version: "1.0.0-package",
-          },
-          expectedVersion: "9.9.9-cli",
-        },
-        {
-          env: {
-            OPENCLAW_VERSION: " ",
-            OPENCLAW_SERVICE_VERSION: "\t",
-            npm_package_version: "1.0.0-package",
-          },
-          expectedVersion: "1.0.0-package",
-        },
-      ]) {
-        await withRuntimeVersionEnv(testCase.env, async () =>
-          expectHelloOkServerVersion(port, testCase.expectedVersion),
-        );
-      }
+    test("connect (req) handshake returns package VERSION (not env-based)", async () => {
+      const { VERSION } = await import("../version.js");
+      // Server version is the build-time/package.json VERSION constant,
+      // not derived from runtime env vars.
+      await expectHelloOkServerVersion(port, VERSION);
     });
 
     test("device-less auth matrix", async () => {
