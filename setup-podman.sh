@@ -234,9 +234,15 @@ if [[ "$INSTALL_QUADLET" == true && -f "$QUADLET_TEMPLATE" ]]; then
   # so the container process can read/write it. The :Z volume flag handles SELinux.
   CONTAINER_UID=1000
   if [[ -n "${OPENCLAW_UID:-}" && "$OPENCLAW_UID" -ne "$CONTAINER_UID" ]]; then
-    echo "Host $OPENCLAW_USER uid ($OPENCLAW_UID) differs from container node uid ($CONTAINER_UID)."
-    echo "Setting config ownership to $CONTAINER_UID:$CONTAINER_UID for Quadlet compatibility..."
-    run_root chown -R "$CONTAINER_UID:$CONTAINER_UID" "$OPENCLAW_CONFIG"
+    EXISTING_USER_1000="$(getent passwd "$CONTAINER_UID" 2>/dev/null | cut -d: -f1 || true)"
+    if [[ -n "$EXISTING_USER_1000" && "$EXISTING_USER_1000" != "$OPENCLAW_USER" ]]; then
+      echo "WARNING: UID $CONTAINER_UID is already claimed by '$EXISTING_USER_1000'." >&2
+      echo "Skipping chown to avoid exposing $OPENCLAW_CONFIG to another user." >&2
+      echo "Manually set ownership or use --userns=keep-id with a matching host uid." >&2
+    else
+      echo "Setting config ownership to $CONTAINER_UID:$CONTAINER_UID for Quadlet compatibility..."
+      run_root chown -R "$CONTAINER_UID:$CONTAINER_UID" "$OPENCLAW_CONFIG"
+    fi
   fi
 
   if command -v systemctl &>/dev/null; then

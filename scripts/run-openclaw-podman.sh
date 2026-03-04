@@ -154,6 +154,12 @@ if [[ ! -f "$CONFIG_JSON" ]]; then
   echo "Created $CONFIG_JSON (minimal gateway.mode=local)." >&2
 fi
 
+# NOTE: When the host openclaw user's UID differs from the container's uid 1000,
+# volume mounts may fail. Either:
+#   1. Run setup-podman.sh --quadlet (handles ownership), or
+#   2. Set OPENCLAW_PODMAN_USERNS=keep-id, or
+#   3. Manually chown the config directory to 1000:1000.
+
 # Container user namespace: default to "auto" which lets the container run as its
 # own uid (node=1000). Use OPENCLAW_PODMAN_USERNS=keep-id to map the host uid into
 # the container (only works when host uid matches the container's node uid 1000).

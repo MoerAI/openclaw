@@ -15,8 +15,8 @@ ContainerName=openclaw
 # handles SELinux relabeling automatically.
 Volume={{OPENCLAW_HOME}}/.openclaw:/home/node/.openclaw:Z
 # Use --env-file via PodmanArgs instead of EnvironmentFile so that the file is
-# read by the container process (uid 1000) rather than by the host Podman process
-# (which may run as a different uid and lack read permission).
+# read by Podman (running as the openclaw service user) rather than by
+# systemd, which may resolve and open the file in a different uid context.
 PodmanArgs=--env-file {{OPENCLAW_HOME}}/.openclaw/.env
 Environment=HOME=/home/node
 Environment=TERM=xterm-256color
