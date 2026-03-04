@@ -74,6 +74,8 @@ export type DiscordThreadCreate = {
   content?: string;
   /** Discord thread type (default: PublicThread for standalone threads). */
   type?: number;
+  /** Tag IDs to apply to forum/media thread posts. */
+  appliedTags?: string[];
 };
 
 export type DiscordThreadList = {
@@ -154,6 +156,8 @@ export type DiscordChannelEdit = {
   locked?: boolean;
   autoArchiveDuration?: number;
   availableTags?: DiscordForumTag[];
+  /** Tag IDs to apply to a forum/media thread (PATCH /channels/{id}). */
+  appliedTags?: string[];
 };
 
 export type DiscordChannelMove = {

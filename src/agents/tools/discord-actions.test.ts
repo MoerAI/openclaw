@@ -317,6 +317,27 @@ describe("handleDiscordMessagingAction", () => {
       messageId: undefined,
       autoArchiveMinutes: undefined,
       content: "Initial forum post body",
+      appliedTags: undefined,
+    });
+  });
+
+  it("forwards appliedTags for threadCreate", async () => {
+    createThreadDiscord.mockClear();
+    await handleDiscordMessagingAction(
+      "threadCreate",
+      {
+        channelId: "C1",
+        name: "Tagged thread",
+        appliedTags: ["tag1", "tag2"],
+      },
+      enableAllActions,
+    );
+    expect(createThreadDiscord).toHaveBeenCalledWith("C1", {
+      name: "Tagged thread",
+      messageId: undefined,
+      autoArchiveMinutes: undefined,
+      content: undefined,
+      appliedTags: ["tag1", "tag2"],
     });
   });
 });
@@ -388,6 +409,7 @@ describe("handleDiscordGuildAction - channel management", () => {
       archived: undefined,
       locked: undefined,
       autoArchiveDuration: undefined,
+      appliedTags: undefined,
     });
   });
 
@@ -413,6 +435,31 @@ describe("handleDiscordGuildAction - channel management", () => {
       archived: true,
       locked: false,
       autoArchiveDuration: 1440,
+      appliedTags: undefined,
+    });
+  });
+
+  it("forwards appliedTags for channelEdit", async () => {
+    await handleDiscordGuildAction(
+      "channelEdit",
+      {
+        channelId: "C1",
+        appliedTags: ["tag1", "tag2"],
+      },
+      channelsEnabled,
+    );
+    expect(editChannelDiscord).toHaveBeenCalledWith({
+      channelId: "C1",
+      name: undefined,
+      topic: undefined,
+      position: undefined,
+      parentId: undefined,
+      nsfw: undefined,
+      rateLimitPerUser: undefined,
+      archived: undefined,
+      locked: undefined,
+      autoArchiveDuration: undefined,
+      appliedTags: ["tag1", "tag2"],
     });
   });
 
@@ -439,6 +486,7 @@ describe("handleDiscordGuildAction - channel management", () => {
       archived: undefined,
       locked: undefined,
       autoArchiveDuration: undefined,
+      appliedTags: undefined,
     });
   });
 
