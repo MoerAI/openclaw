@@ -154,7 +154,10 @@ if [[ ! -f "$CONFIG_JSON" ]]; then
   echo "Created $CONFIG_JSON (minimal gateway.mode=local)." >&2
 fi
 
-PODMAN_USERNS="${OPENCLAW_PODMAN_USERNS:-keep-id}"
+# Container user namespace: default to "auto" which lets the container run as its
+# own uid (node=1000). Use OPENCLAW_PODMAN_USERNS=keep-id to map the host uid into
+# the container (only works when host uid matches the container's node uid 1000).
+PODMAN_USERNS="${OPENCLAW_PODMAN_USERNS:-auto}"
 USERNS_ARGS=()
 RUN_USER_ARGS=()
 case "$PODMAN_USERNS" in
@@ -162,7 +165,7 @@ case "$PODMAN_USERNS" in
   keep-id) USERNS_ARGS=(--userns=keep-id) ;;
   host) USERNS_ARGS=(--userns=host) ;;
   *)
-    echo "Unsupported OPENCLAW_PODMAN_USERNS=$PODMAN_USERNS (expected: keep-id, auto, host)." >&2
+    echo "Unsupported OPENCLAW_PODMAN_USERNS=$PODMAN_USERNS (expected: auto, keep-id, host)." >&2
     exit 2
     ;;
 esac
@@ -173,7 +176,7 @@ if [[ "$PODMAN_USERNS" == "keep-id" ]]; then
   RUN_USER_ARGS=(--user "${RUN_UID}:${RUN_GID}")
   echo "Starting container as uid=${RUN_UID} gid=${RUN_GID} (must match owner of $CONFIG_DIR)" >&2
 else
-  echo "Starting container without --user (OPENCLAW_PODMAN_USERNS=$PODMAN_USERNS), mounts may require ownership fixes." >&2
+  echo "Starting container as container default user (node, uid 1000)." >&2
 fi
 
 ENV_FILE_ARGS=()
@@ -185,8 +188,8 @@ if [[ "$RUN_SETUP" == true ]]; then
     "${USERNS_ARGS[@]}" "${RUN_USER_ARGS[@]}" \
     -e HOME=/home/node -e TERM=xterm-256color -e BROWSER=echo \
     -e OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN" \
-    -v "$CONFIG_DIR:/home/node/.openclaw:rw" \
-    -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw" \
+    -v "$CONFIG_DIR:/home/node/.openclaw:rw,Z" \
+    -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw,Z" \
     "${ENV_FILE_ARGS[@]}" \
     "$OPENCLAW_IMAGE" \
     node dist/index.js onboard "$@"
@@ -199,8 +202,8 @@ podman run --pull="$PODMAN_PULL" -d --replace \
   -e HOME=/home/node -e TERM=xterm-256color \
   -e OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN" \
   "${ENV_FILE_ARGS[@]}" \
-  -v "$CONFIG_DIR:/home/node/.openclaw:rw" \
-  -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw" \
+  -v "$CONFIG_DIR:/home/node/.openclaw:rw,Z" \
+  -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace:rw,Z" \
   -p "${HOST_GATEWAY_PORT}:18789" \
   -p "${HOST_BRIDGE_PORT}:18790" \
   "$OPENCLAW_IMAGE" \

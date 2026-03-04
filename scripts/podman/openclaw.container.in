@@ -8,9 +8,16 @@ Description=OpenClaw gateway (rootless Podman)
 [Container]
 Image=openclaw:local
 ContainerName=openclaw
-UserNS=keep-id
-Volume={{OPENCLAW_HOME}}/.openclaw:/home/node/.openclaw
-EnvironmentFile={{OPENCLAW_HOME}}/.openclaw/.env
+# Note: UserNS=keep-id is intentionally omitted. The container runs as uid 1000
+# (node user). On hosts where the openclaw user has a different uid (e.g. Fedora
+# Silverblue), keep-id causes UID mismatch. Without it, the container process
+# runs as the container's default user (node, uid 1000) and the :Z volume flag
+# handles SELinux relabeling automatically.
+Volume={{OPENCLAW_HOME}}/.openclaw:/home/node/.openclaw:Z
+# Use --env-file via PodmanArgs instead of EnvironmentFile so that the file is
+# read by the container process (uid 1000) rather than by the host Podman process
+# (which may run as a different uid and lack read permission).
+PodmanArgs=--env-file {{OPENCLAW_HOME}}/.openclaw/.env
 Environment=HOME=/home/node
 Environment=TERM=xterm-256color
 PublishPort=18789:18789

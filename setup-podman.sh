@@ -228,6 +228,17 @@ if [[ "$INSTALL_QUADLET" == true && -f "$QUADLET_TEMPLATE" ]]; then
   sed "s|{{OPENCLAW_HOME}}|$OPENCLAW_HOME_SED|g" "$QUADLET_TEMPLATE" | run_as_openclaw tee "$QUADLET_DIR/openclaw.container" >/dev/null
   run_as_openclaw chmod 700 "$OPENCLAW_HOME/.config" "$OPENCLAW_HOME/.config/containers" "$QUADLET_DIR" 2>/dev/null || true
   run_as_openclaw chmod 600 "$QUADLET_DIR/openclaw.container" 2>/dev/null || true
+
+  # The container runs as uid 1000 (node user) without --userns=keep-id.
+  # If the host openclaw user has a different uid, chown the config dir to 1000
+  # so the container process can read/write it. The :Z volume flag handles SELinux.
+  CONTAINER_UID=1000
+  if [[ -n "${OPENCLAW_UID:-}" && "$OPENCLAW_UID" -ne "$CONTAINER_UID" ]]; then
+    echo "Host $OPENCLAW_USER uid ($OPENCLAW_UID) differs from container node uid ($CONTAINER_UID)."
+    echo "Setting config ownership to $CONTAINER_UID:$CONTAINER_UID for Quadlet compatibility..."
+    run_root chown -R "$CONTAINER_UID:$CONTAINER_UID" "$OPENCLAW_CONFIG"
+  fi
+
   if command -v systemctl &>/dev/null; then
     run_root systemctl --machine "${OPENCLAW_USER}@" --user daemon-reload 2>/dev/null || true
     run_root systemctl --machine "${OPENCLAW_USER}@" --user enable openclaw.service 2>/dev/null || true
