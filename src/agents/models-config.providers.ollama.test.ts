@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   isOllamaReachable,
   resolveImplicitProviders,
@@ -137,6 +137,40 @@ describe("Ollama keyless auto-discovery", () => {
     // should not inject an implicit ollama when explicit already exists
     // and no env/profile key is configured.
     expect(providers?.ollama).toBeUndefined();
+  });
+
+  it("registers ollama with empty apiKey when server is reachable (happy path)", async () => {
+    // Mock global fetch to simulate a reachable Ollama server returning models.
+    const mockModels = {
+      models: [
+        { name: "llama3.3:latest", model: "llama3.3:latest", size: 0, digest: "", details: {} },
+      ],
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => mockModels,
+    }) as unknown as typeof fetch;
+    // Temporarily clear VITEST env so probeOllamaModels doesn't short-circuit.
+    const origVitest = process.env.VITEST;
+    const origNodeEnv = process.env.NODE_ENV;
+    delete process.env.VITEST;
+    delete process.env.NODE_ENV;
+    const agentDir = mkdtempSync(join(tmpdir(), "openclaw-test-"));
+    try {
+      const result = await resolveImplicitProviders({ agentDir });
+      expect(result?.ollama).toBeDefined();
+      expect(result?.ollama?.apiKey).toBe("");
+      expect(result?.ollama?.api).toBe("ollama");
+      expect(result?.ollama?.models?.length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.env.VITEST = origVitest;
+      if (origNodeEnv !== undefined) {
+        process.env.NODE_ENV = origNodeEnv;
+      }
+      vi.restoreAllMocks();
+    }
   });
 
   it("should still register with key even when explicit provider exists", async () => {

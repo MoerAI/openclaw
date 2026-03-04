@@ -235,24 +235,54 @@ export function resolveOllamaApiBase(configuredBaseUrl?: string): string {
 }
 
 /**
- * Quick reachability check for a local Ollama server.
- * Returns true if the `/api/tags` endpoint responds within the timeout.
- * Used for keyless auto-discovery: when no API key is configured, we probe
- * the default (or configured) Ollama URL before registering the provider.
+ * Probe a local Ollama server and discover its models in a single fetch.
+ * Returns the discovered model definitions on success, or `null` if the
+ * server is unreachable / returns an error. This avoids the double-fetch
+ * that would occur if reachability and model discovery were separate calls.
  */
-export async function isOllamaReachable(baseUrl: string): Promise<boolean> {
+export async function probeOllamaModels(
+  baseUrl: string,
+): Promise<ModelDefinitionConfig[] | null> {
   // Skip in test environments (same guard as discoverOllamaModels)
   if (process.env.VITEST || process.env.NODE_ENV === "test") {
-    return false;
+    return null;
   }
   try {
     const response = await fetch(`${baseUrl}/api/tags`, {
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(5000),
     });
-    return response.ok;
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as OllamaTagsResponse;
+    if (!data.models || data.models.length === 0) {
+      return [];
+    }
+    return data.models.map((model) => {
+      const modelId = model.name;
+      const isReasoning =
+        modelId.toLowerCase().includes("r1") || modelId.toLowerCase().includes("reasoning");
+      return {
+        id: modelId,
+        name: modelId,
+        reasoning: isReasoning,
+        input: ["text"],
+        cost: OLLAMA_DEFAULT_COST,
+        contextWindow: OLLAMA_DEFAULT_CONTEXT_WINDOW,
+        maxTokens: OLLAMA_DEFAULT_MAX_TOKENS,
+      };
+    });
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Thin wrapper for backward compatibility — returns true when the server
+ * is reachable (i.e. `probeOllamaModels` returns non-null).
+ */
+export async function isOllamaReachable(baseUrl: string): Promise<boolean> {
+  return (await probeOllamaModels(baseUrl)) !== null;
 }
 
 async function discoverOllamaModels(baseUrl?: string): Promise<ModelDefinitionConfig[]> {
@@ -662,8 +692,11 @@ async function buildVeniceProvider(): Promise<ProviderConfig> {
   };
 }
 
-async function buildOllamaProvider(configuredBaseUrl?: string): Promise<ProviderConfig> {
-  const models = await discoverOllamaModels(configuredBaseUrl);
+async function buildOllamaProvider(
+  configuredBaseUrl?: string,
+  prefetchedModels?: ModelDefinitionConfig[],
+): Promise<ProviderConfig> {
+  const models = prefetchedModels ?? (await discoverOllamaModels(configuredBaseUrl));
   return {
     baseUrl: resolveOllamaApiBase(configuredBaseUrl),
     api: "ollama",
@@ -944,9 +977,14 @@ export async function resolveImplicitProviders(params: {
       providers.ollama = { ...(await buildOllamaProvider(ollamaBaseUrl)), apiKey: ollamaKey };
     } else {
       // No key configured — probe the local Ollama server for keyless registration.
+      // Single fetch: probeOllamaModels returns discovered models (or null if unreachable).
       const ollamaBaseUrl = resolveOllamaApiBase(params.explicitProviders?.ollama?.baseUrl);
-      if (await isOllamaReachable(ollamaBaseUrl)) {
-        providers.ollama = { ...(await buildOllamaProvider()), apiKey: "local" };
+      const discoveredModels = await probeOllamaModels(ollamaBaseUrl);
+      if (discoveredModels !== null) {
+        providers.ollama = {
+          ...(await buildOllamaProvider(undefined, discoveredModels)),
+          apiKey: "",
+        };
       }
     }
   } else {
