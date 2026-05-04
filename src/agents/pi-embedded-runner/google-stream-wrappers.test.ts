@@ -169,6 +169,9 @@ describe("createGoogleThinkingPayloadWrapper — Google API shape coverage (#383
       onPayload?.({
         config: { thinkingConfig: { thinkingBudget: -1 } },
       });
+      // Empty generator: payload capture happens via the onPayload callback above,
+      // so the iterable yields no chunks (mirrors the production guard's no-op path).
+      yield* [];
     });
     const wrapped = createGoogleThinkingPayloadWrapper(baseStreamFn as never, undefined);
     const generator = wrapped(model as never, { messages: [] } as never, {
