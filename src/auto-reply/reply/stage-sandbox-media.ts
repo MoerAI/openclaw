@@ -318,8 +318,14 @@ async function scpFile(remoteHost: string, remotePath: string, localPath: string
     throw new Error("invalid remote path for SCP");
   }
   return new Promise((resolve, reject) => {
+    // Resolve `scp` via PATH so OpenSSH installs that live outside `/usr/bin`
+    // (Windows OpenSSH, Homebrew, Nix, custom prefixes) can stage remote
+    // attachments. The argv (BatchMode + StrictHostKeyChecking + `--` separator)
+    // already prevents shell-injection, so PATH lookup does not widen the
+    // attack surface beyond what the surrounding `normalizeScpRemote*` helpers
+    // already guard. (#78677)
     const child = spawn(
-      "/usr/bin/scp",
+      "scp",
       [
         "-o",
         "BatchMode=yes",

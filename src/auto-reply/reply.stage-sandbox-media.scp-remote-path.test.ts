@@ -117,4 +117,35 @@ describe("stageSandboxMedia scp remote paths", () => {
       }
     });
   });
+
+  it("invokes scp via PATH instead of a hardcoded /usr/bin/scp absolute path (#78677)", async () => {
+    await withSandboxMediaTempHome("openclaw-triggers-", async (home) => {
+      const { cfg, workspaceDir, sessionKey } = createRemoteStageParams(home);
+      const remotePath = "/Users/demo/Library/Messages/Attachments/ab/cd/photo.jpg";
+      const { ctx, sessionCtx } = createRemoteContexts(remotePath);
+      childProcessMocks.spawn.mockImplementation(() => {
+        // Stop before any actual ssh handshake. We only assert spawn argv.
+        throw new Error("stop before scp");
+      });
+
+      await stageSandboxMedia({
+        ctx,
+        sessionCtx,
+        cfg,
+        sessionKey,
+        workspaceDir,
+      });
+
+      // OpenSSH lives outside `/usr/bin` on Windows native (typically
+      // `C:\\Windows\\System32\\OpenSSH\\scp.exe`) and on Homebrew/Nix-based
+      // macOS/Linux installs. The fix routes through PATH lookup by passing
+      // the bare command name `scp` so `child_process.spawn` resolves the
+      // OS-appropriate binary instead of failing with `ENOENT` on a hardcoded
+      // FHS path.
+      expect(childProcessMocks.spawn).toHaveBeenCalled();
+      const command = childProcessMocks.spawn.mock.calls[0]?.[0];
+      expect(command).toBe("scp");
+      expect(command).not.toBe("/usr/bin/scp");
+    });
+  });
 });
