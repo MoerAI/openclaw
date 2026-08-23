@@ -991,14 +991,16 @@ describe("compaction-safeguard recent-turn preservation", () => {
     expect(messagesToSummarize).toStrictEqual(transcriptBefore);
   });
 
-  it("caps summarization reserve tokens to the model output limit", async () => {
+  it.each([
+    // Keep the model limit below the staged-summary ceiling so this row still
+    // proves the model-limit clamp rather than the safeguard's own ceiling.
+    { cap: "model output limit", maxTokens: 4_000, reserve: 8_000, expected: 4_000 },
+    { cap: "staged-summary ceiling", maxTokens: 128_000, reserve: 80_000, expected: 20_000 },
+  ])("caps summarization reserve tokens to the $cap", async ({ maxTokens, reserve, expected }) => {
     mockSummarizeInStages.mockResolvedValue("mock summary");
 
     const sessionManager = configuredSession({
-      model: createAnthropicModelFixture({
-        contextWindow: 1_000_000,
-        maxTokens: 128_000,
-      }),
+      model: createAnthropicModelFixture({ contextWindow: 1_000_000, maxTokens }),
       recentTurnsPreserve: 0,
     });
 
@@ -1006,14 +1008,14 @@ describe("compaction-safeguard recent-turn preservation", () => {
       preparation: {
         messagesToSummarize: [userMessage("large history", 1) as AgentMessage],
         tokensBefore: 250_000,
-        settings: { reserveTokens: 240_000 },
+        settings: { reserveTokens: reserve },
       },
     });
 
     await runCompactionScenario(sessionManager, event);
 
     const call = requireRecord(mockCallArg(mockSummarizeInStages));
-    expect(call?.reserveTokens).toBe(128_000);
+    expect(call?.reserveTokens).toBe(expected);
   });
 
   it("preserves provider-prepared Copilot headers in built-in compaction summarization", async () => {
