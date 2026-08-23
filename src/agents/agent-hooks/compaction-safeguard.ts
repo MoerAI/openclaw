@@ -79,6 +79,7 @@ const TURN_PREFIX_INSTRUCTIONS =
   " early progress, and any details needed to understand the retained suffix.";
 const MAX_TOOL_FAILURES = 8;
 const MAX_TOOL_FAILURE_CHARS = 240;
+const MAX_STAGED_SUMMARY_RESERVE_TOKENS = 20_000;
 const CONTEXT_TRUNCATED_MARKER = "\n\n[Earlier compaction context truncated to fit budget]\n\n";
 // Split-turn context supplements the generated summary and must not claim its
 // guaranteed half of the final artifact before common finalization runs.
@@ -637,7 +638,11 @@ function resolveSummaryReserveTokens(
   requestedReserveTokens: number,
   model: NonNullable<Parameters<typeof summarizeInStages>[0]["model"]>,
 ): number {
-  const requested = Math.max(1, Math.floor(requestedReserveTokens));
+  // Safeguard owns retained-summary policy; generic callers own their output budget.
+  const requested = Math.max(
+    1,
+    Math.min(Math.floor(requestedReserveTokens), MAX_STAGED_SUMMARY_RESERVE_TOKENS),
+  );
   const modelMaxTokens = model.maxTokens;
   if (
     typeof modelMaxTokens !== "number" ||
