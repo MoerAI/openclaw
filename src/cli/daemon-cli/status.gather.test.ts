@@ -726,6 +726,49 @@ describe("gatherDaemonStatus", () => {
     expect(probeInput.configPath).toBe("/tmp/openclaw-daemon/openclaw.json");
   });
 
+  it("marks the generated probe target as derived so required RPC keeps local auth semantics", async () => {
+    await gatherStatus({ requireRpc: true });
+
+    const probeInput = callArg(callGatewayStatusProbe) as {
+      derivedTargetPort?: number;
+    };
+    expect(probeInput.derivedTargetPort).toBe(19001);
+  });
+
+  it("keeps the exact URL for non-loopback derived probe hosts", async () => {
+    const defaultDaemonConfig = daemonLoadedConfig;
+    daemonLoadedConfig = {
+      gateway: {
+        bind: "tailnet",
+        tls: { enabled: true },
+        auth: { token: "daemon-token" },
+      },
+    };
+    try {
+      await gatherStatus({ requireRpc: true });
+
+      const probeInput = callArg(callGatewayStatusProbe) as {
+        url?: string;
+        derivedTargetPort?: number;
+      };
+      expect(probeInput.url).toBe("wss://100.64.0.9:19001");
+      expect(probeInput.derivedTargetPort).toBeUndefined();
+    } finally {
+      daemonLoadedConfig = defaultDaemonConfig;
+    }
+  });
+
+  it("keeps a user URL override as an override for the required RPC probe", async () => {
+    await gatherStatus({ requireRpc: true, rpc: { url: "ws://127.0.0.1:19999" } });
+
+    const probeInput = callArg(callGatewayStatusProbe) as {
+      url?: string;
+      derivedTargetPort?: number;
+    };
+    expect(probeInput.url).toBe("ws://127.0.0.1:19999");
+    expect(probeInput.derivedTargetPort).toBeUndefined();
+  });
+
   it("reuses the shared CLI config snapshot when the daemon uses the same config path", async () => {
     serviceReadCommand.mockResolvedValueOnce({
       programArguments: ["/bin/node", "cli", "gateway", "--port", "19001"],

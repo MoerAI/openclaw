@@ -48,6 +48,8 @@ function projectGatewayConnectFailure(params: {
 /** Probe Gateway connectivity or read-capability status with optional RPC verification. */
 export async function probeGatewayStatus(opts: {
   url: string;
+  /** Port of a status-derived local target; unset when `url` is a real caller override. */
+  derivedTargetPort?: number;
   localPortOverride?: number;
   token?: string;
   password?: string;
@@ -81,9 +83,13 @@ export async function probeGatewayStatus(opts: {
           }
           const { resolveProbeAuthSummary } = await probeGatewayModuleLoader.load();
           const { callGateway } = await import("../../gateway/call.js");
+          // A derived local target must not become a caller URL override: the
+          // explicit-auth guard would reject auth-none Gateways that the plain
+          // health probe accepts. Resolve the configured local target by port.
           await callGateway({
-            url: opts.url,
-            localPortOverride: opts.localPortOverride,
+            ...(opts.derivedTargetPort === undefined
+              ? { url: opts.url, localPortOverride: opts.localPortOverride }
+              : { localPortOverride: opts.derivedTargetPort }),
             token: opts.token,
             password: opts.password,
             tlsFingerprint: opts.tlsFingerprint,

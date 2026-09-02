@@ -124,6 +124,7 @@ type ResolvedGatewayStatus = {
   cliPort: number;
   probeUrl: string;
   probeUrlOverride: string | null;
+  derivedLocalTargetPort?: number;
 };
 
 type CliStatusSummary = {
@@ -439,6 +440,10 @@ async function resolveGatewayStatusSummary(params: {
   const tlsEnabled = params.daemonCfg.gateway?.tls?.enabled === true;
   const scheme = tlsEnabled ? "wss" : "ws";
   const probeUrl = probeUrlOverride ?? `${scheme}://${probeHost}:${daemonPort}`;
+  // Only a loopback-hosted derived target may probe by port: tailnet/custom hosts
+  // must keep their exact URL so the RPC check exercises the reported endpoint.
+  const derivedLocalTargetPort =
+    !probeUrlOverride && probeHost === "127.0.0.1" ? daemonPort : undefined;
   const diagnosticProbeUrl = projectGatewayUrlForDiagnostics(probeUrl);
   const controlUiLinks =
     params.daemonCfg.gateway?.controlUi?.enabled === false
@@ -475,6 +480,7 @@ async function resolveGatewayStatusSummary(params: {
     cliPort: resolveGatewayPort(params.cliCfg, process.env),
     probeUrl,
     probeUrlOverride,
+    ...(derivedLocalTargetPort !== undefined ? { derivedLocalTargetPort } : {}),
   };
 }
 
@@ -616,7 +622,7 @@ export async function gatherDaemonStatus(
     daemonConfigSummary,
     configMismatch,
   } = await loadDaemonConfigContext(targetServiceCommand?.environment, { deep: opts.deep });
-  const { gateway, daemonPort, cliPort, probeUrl, probeUrlOverride } =
+  const { gateway, daemonPort, cliPort, probeUrl, probeUrlOverride, derivedLocalTargetPort } =
     await resolveGatewayStatusSummary({
       cliCfg,
       daemonCfg,
@@ -715,6 +721,9 @@ export async function gatherDaemonStatus(
     ? await loadDaemonProbeModule().then(({ probeGatewayStatus }) =>
         probeGatewayStatus({
           url: probeUrl,
+          ...(derivedLocalTargetPort !== undefined
+            ? { derivedTargetPort: derivedLocalTargetPort }
+            : {}),
           localPortOverride,
           token: daemonProbeAuth?.token,
           password: daemonProbeAuth?.password,

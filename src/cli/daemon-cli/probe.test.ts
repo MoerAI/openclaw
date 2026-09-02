@@ -338,6 +338,32 @@ describe("probeGatewayStatus", () => {
     },
   );
 
+  it("resolves a derived local target by port so required RPC skips the explicit-URL guard", async () => {
+    callGatewayMock.mockReset();
+    probeGatewayMock.mockReset();
+    callGatewayMock.mockImplementationOnce(async (opts) => {
+      opts.onHelloOk?.({
+        server: { version: "2026.8.1", connId: "conn-1" },
+        auth: { role: "operator", scopes: ["operator.read"] },
+      });
+      return { status: "ok" };
+    });
+
+    const result = await probeGatewayStatus({
+      url: "ws://127.0.0.1:18931",
+      derivedTargetPort: 18931,
+      timeoutMs: 5_000,
+      json: true,
+      requireRpc: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(callGatewayMock).toHaveBeenCalledOnce();
+    const callOpts = callGatewayMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callOpts).not.toHaveProperty("url");
+    expect(callOpts.localPortOverride).toBe(18931);
+  });
+
   it("keeps required status to one timeout-bound RPC", async () => {
     callGatewayMock.mockReset();
     probeGatewayMock.mockReset();
