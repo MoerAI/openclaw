@@ -246,7 +246,36 @@ describe("writeWizardConfigFile", () => {
         entries: {
           demo: {
             enabled: true,
-            config: { choice: 1, unchangedNull: "concurrent", nested: { existing: true } },
+            config: {
+              callerOwned: "concurrent",
+              choice: 1,
+              unchangedNull: "concurrent",
+              nested: { existing: true },
+            },
+          },
+        },
+      },
+      gateway: { port: 19001 },
+    };
+    const explicitSetValueSource: OpenClawConfig = {
+      plugins: {
+        entries: {
+          demo: {
+            config: { callerOwned: "caller" },
+          },
+        },
+      },
+    };
+    const sourceConfig: OpenClawConfig = {
+      plugins: {
+        entries: {
+          demo: {
+            enabled: true,
+            config: {
+              choice: 1,
+              unchangedNull: "concurrent",
+              nested: { existing: true },
+            },
           },
         },
       },
@@ -261,7 +290,7 @@ describe("writeWizardConfigFile", () => {
         return {
           nextConfig: resolvePersistCandidateForWrite({
             runtimeConfig: mocks.currentConfig,
-            sourceConfig: mocks.currentConfig,
+            sourceConfig,
             nextConfig,
             ...params.writeOptions,
           }) as OpenClawConfig,
@@ -269,12 +298,21 @@ describe("writeWizardConfigFile", () => {
       },
     );
 
-    await expect(writeWizardConfigFile(next, { mergeBase: base })).resolves.toEqual({
+    await expect(
+      writeWizardConfigFile(next, {
+        mergeBase: base,
+        writeOptions: {
+          explicitSetPaths: [["plugins", "entries", "demo", "config", "callerOwned"]],
+          explicitSetValueSource,
+        },
+      }),
+    ).resolves.toEqual({
       plugins: {
         entries: {
           demo: {
             enabled: true,
             config: {
+              callerOwned: "caller",
               choice: null,
               unchangedNull: "concurrent",
               nested: { existing: true, optional: null },
