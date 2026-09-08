@@ -75,6 +75,24 @@ async function readPreLaunchTaskPids(
   const pids = new Set<number>();
   let hadTaskScriptWrapper = false;
   try {
+    const command = await readScheduledTaskCommand(env);
+    if (!command) {
+      return { pids, hadTaskScriptWrapper, complete: false };
+    }
+    const port = resolveScheduledTaskCommandPort(env, command);
+    const manageGatewayPort = shouldManageGatewayListenerPort(env);
+    if (port && manageGatewayPort) {
+      const probeHosts = await resolveGatewayServiceProbeHosts({ env, command });
+      for (const pid of await resolveScheduledTaskOwnedGatewayPids(
+        env,
+        { port, probeHosts },
+        command,
+      )) {
+        pids.add(pid);
+      }
+    }
+    // All asynchronous command, probe-host, and ownership preparation must finish before this
+    // final snapshot. A wrapper that starts during that preparation is still pre-`/Run` state.
     const snapshot = readWindowsProcessSnapshot();
     if (!snapshot && process.platform === "win32") {
       return { pids, hadTaskScriptWrapper, complete: false };
@@ -97,24 +115,8 @@ async function readPreLaunchTaskPids(
         }
       }
     }
-    const command = await readScheduledTaskCommand(env);
-    if (!command) {
-      return { pids, hadTaskScriptWrapper, complete: false };
-    }
-    const port = resolveScheduledTaskCommandPort(env, command);
     if (port) {
-      const manageGatewayPort = shouldManageGatewayListenerPort(env);
-      if (manageGatewayPort) {
-        const probeHosts = await resolveGatewayServiceProbeHosts({ env, command });
-        for (const pid of await resolveScheduledTaskOwnedGatewayPids(
-          env,
-          { port, probeHosts },
-          command,
-        )) {
-          pids.add(pid);
-        }
-      }
-      const installedArguments = command?.programArguments;
+      const installedArguments = command.programArguments;
       if (snapshot && installedArguments?.length) {
         const candidates = manageGatewayPort
           ? [installedArguments, [...installedArguments, WINDOWS_TASK_SUPERVISOR_FLAG]]

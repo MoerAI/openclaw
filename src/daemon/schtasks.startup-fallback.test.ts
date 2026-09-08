@@ -26,6 +26,7 @@ vi.mock("../infra/windows-encoding.js", async () => {
 });
 
 import {
+  gatewayServiceProbeHostsMock,
   inspectPortUsageMock,
   killProcessTreeMock,
   resetSchtasksBaseMocks,
@@ -1879,6 +1880,56 @@ describe("Windows startup fallback", () => {
     });
   });
 
+  it("does not treat a task wrapper started during launch preparation as new launch evidence", async () => {
+    await withWindowsEnv("openclaw-win-startup-", async ({ env }) => {
+      vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+      const taskScriptPath = resolveTaskScriptPath(env);
+      fastForwardTaskStartWait();
+      let wrapperStarted = false;
+      let signalPreparationStarted!: () => void;
+      let releasePreparation!: () => void;
+      const preparationStarted = new Promise<void>((resolve) => {
+        signalPreparationStarted = resolve;
+      });
+      const preparationRelease = new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      gatewayServiceProbeHostsMock.mockImplementationOnce(async () => {
+        signalPreparationStarted();
+        await preparationRelease;
+        return ["127.0.0.1"];
+      });
+      spawnSync.mockImplementation((command, args) => {
+        if (
+          command === getWindowsPowerShellExePath() &&
+          Array.isArray(args) &&
+          args.includes(NODE_PROCESS_QUERY)
+        ) {
+          return makeSpawnSyncResult({
+            stdout: JSON.stringify(
+              wrapperStarted
+                ? [
+                    { ProcessId: 4242, CommandLine: `cmd.exe /d /s /c "${taskScriptPath}"` },
+                    { ProcessId: 9999, CommandLine: "powershell.exe" },
+                  ]
+                : [{ ProcessId: 9999, CommandLine: "powershell.exe" }],
+            ),
+          });
+        }
+        return makeSpawnSyncResult();
+      });
+      addAcceptedRunNeverStartsResponses();
+
+      const activation = installGatewayScheduledTask(env);
+      await preparationStarted;
+      wrapperStarted = true;
+      releasePreparation();
+
+      await expect(activation).rejects.toThrow("refusing a direct fallback");
+      expect(spawn).not.toHaveBeenCalled();
+    });
+  });
+
   it("does not treat a pre-existing Windows gateway process as Scheduled Task launch evidence", async () => {
     await withWindowsEnv("openclaw-win-startup-", async ({ env }) => {
       vi.spyOn(process, "platform", "get").mockReturnValue("win32");
@@ -2026,7 +2077,7 @@ describe("Windows startup fallback", () => {
         ) {
           return makeSpawnSyncResult();
         }
-        if (snapshotQueries++ === 0) {
+        if (snapshotQueries++ < 2) {
           return makeSpawnSyncResult({ status: 1, stderr: "CIM unavailable" });
         }
         return makeSpawnSyncResult({
@@ -2064,19 +2115,18 @@ describe("Windows startup fallback", () => {
       fastForwardTaskStartWait();
       const installedGatewayCommandLine =
         '"C:\\Program Files\\nodejs\\node.exe" "C:\\openclaw\\dist\\index.js" gateway --port 18789';
-      let snapshotQueries = 0;
       spawnSync.mockImplementation((command, args) =>
         command === getWindowsPowerShellExePath() &&
         Array.isArray(args) &&
         args.includes(NODE_PROCESS_QUERY)
           ? makeSpawnSyncResult({
               stdout: JSON.stringify(
-                snapshotQueries++ === 0
-                  ? [{ ProcessId: 4242, CommandLine: installedGatewayCommandLine }]
-                  : [
+                schtasksCalls.some((call) => call[0] === "/Run")
+                  ? [
                       { ProcessId: 4242, CommandLine: installedGatewayCommandLine },
                       { ProcessId: 5353, CommandLine: installedGatewayCommandLine },
-                    ],
+                    ]
+                  : [{ ProcessId: 4242, CommandLine: installedGatewayCommandLine }],
               ),
             })
           : makeSpawnSyncResult(),
