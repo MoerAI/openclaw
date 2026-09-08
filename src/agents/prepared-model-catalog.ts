@@ -31,7 +31,7 @@ import {
   prepareModelRuntimeSnapshot,
   PreparedModelRuntimeOwnerNotPublishedError,
   preparedModelRuntimeConfigsMatch,
-  refreshStalePreparedModelRuntimeCatalog,
+  refreshPreparedModelRuntimeCatalog,
   type PreparedModelRuntimeInput,
   type PreparedModelRuntimeSnapshot,
 } from "./prepared-model-runtime.js";
@@ -53,8 +53,8 @@ export type LoadPreparedModelCatalogParams = {
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
   providerDiscoveryProviderIds?: readonly string[];
-  /** Refreshes auth-stale inventory; true also rebuilds a fresh full catalog on writable reads. */
-  refreshFullCatalog?: boolean | "stale";
+  /** Explicitly requests full inventory acquisition; writable reads also replace completed data. */
+  refreshFullCatalog?: boolean;
   /** Scoped read-only loads may run live discovery for the scoped providers only. */
   scopedLiveProviderDiscovery?: boolean;
   allowGatewaySubagentBinding?: boolean;
@@ -75,16 +75,29 @@ async function materializeRequestedModelCatalog(
   if (!snapshot.loadFullModelCatalog) {
     return snapshot;
   }
-  // Inventory reads repair auth-stale content without making turn-path reads start discovery.
-  const staleCatalog =
-    refreshFullCatalog === "stale" || refreshFullCatalog === true
-      ? await refreshStalePreparedModelRuntimeCatalog(snapshot)
+  // Only an explicit refresh request initializes or refreshes inventory.
+  const inventoryCatalog =
+    refreshFullCatalog === true
+      ? await refreshPreparedModelRuntimeCatalog(snapshot, {
+          refresh: readOnly !== true,
+        })
       : undefined;
   const modelCatalog =
-    staleCatalog ??
+    inventoryCatalog ??
     (readOnly === true
       ? snapshot.readFullModelCatalog?.()
       : await snapshot.loadFullModelCatalog({ refresh: refreshFullCatalog === true }));
+  if (!modelCatalog) {
+    return snapshot;
+  }
+  return materializePreparedModelCatalogOwner(snapshot, modelCatalog);
+}
+
+/** Carries a completed catalog and its paired auth without acquiring or refreshing facts. */
+export function materializePreparedModelCatalogOwner(
+  snapshot: PreparedModelRuntimeSnapshot,
+  modelCatalog: ModelCatalogSnapshot | undefined = snapshot.readFullModelCatalog?.(),
+): PreparedModelRuntimeSnapshot {
   if (!modelCatalog) {
     return snapshot;
   }
@@ -269,7 +282,9 @@ async function resolvePreparedModelCatalogOwnerSnapshotWithPolicy(
   }
   // Direct commands own a persistent standalone generation. During gateway lifetime, writable
   // publication belongs exclusively to startup/reload or agent-run admission.
-  const activated = await activateStandalonePreparedModelRuntime(activationExact);
+  const activated = await activateStandalonePreparedModelRuntime(activationExact, {
+    catalogMode: "static",
+  });
   if (activated && acceptsPreparedSnapshotConfig(activated, activationExact, configPolicy)) {
     return { snapshot: activated };
   }

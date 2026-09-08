@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createWizardPrompter } from "../../test/helpers/wizard-prompter.js";
+import { createTestConfigFileStore } from "../commands/test-runtime-config-helpers.js";
 import type { ConfigWriteOptions } from "../config/io.js";
 import { resolvePersistCandidateForWrite } from "../config/io.write-prepare.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.openclaw.js";
 import type { WizardPrompter } from "./prompts.js";
+
+const configFiles = createTestConfigFileStore();
 
 const mocks = vi.hoisted(() => ({
   currentConfig: {} as OpenClawConfig,
@@ -16,6 +19,7 @@ vi.mock("../plugins/install-record-commit.js", async (importOriginal) => ({
 }));
 
 import {
+  formatQuickstartGatewaySummary,
   requestTelemetryConsent,
   resolveQuickstartGatewayDefaults,
   writeWizardConfigFile,
@@ -75,6 +79,22 @@ describe("resolveQuickstartGatewayDefaults", () => {
       },
     },
   };
+
+  it.each([
+    { config: {}, expected: "Gateway secret (generated)", mode: "token" },
+    {
+      config: { gateway: { auth: { mode: "password" as const, password: "saved-password" } } },
+      expected: "Password",
+      mode: "password",
+    },
+  ])(
+    "summarizes the resolved $mode secret without offering an auth choice",
+    ({ config, expected, mode }) => {
+      const defaults = resolveQuickstartGatewayDefaults(config);
+      expect(defaults.authMode).toBe(mode);
+      expect(formatQuickstartGatewaySummary(defaults, defaults.hasExisting)).toContain(expected);
+    },
+  );
 
   it("overlays every explicitly supplied classic quickstart gateway option", () => {
     const result = resolveQuickstartGatewayDefaults(storedConfig, {
@@ -158,9 +178,8 @@ describe("writeWizardConfigFile", () => {
     vi.clearAllMocks();
     mocks.currentConfig = {};
     mocks.transformConfigWithPendingPluginInstalls.mockImplementation(
-      async (params: {
-        transform: (current: OpenClawConfig) => { nextConfig: OpenClawConfig };
-      }) => ({ nextConfig: params.transform(mocks.currentConfig).nextConfig }),
+      async (params: { transform: (current: OpenClawConfig) => { nextConfig: OpenClawConfig } }) =>
+        configFiles.write(params.transform(mocks.currentConfig).nextConfig),
     );
   });
 
@@ -191,7 +210,10 @@ describe("writeWizardConfigFile", () => {
     };
     mocks.currentConfig = { gateway: { port: 19001 } };
 
-    await expect(writeWizardConfigFile(config)).resolves.toEqual(config);
+    await expect(writeWizardConfigFile(config)).resolves.toMatchObject({
+      nextConfig: config,
+      path: "/tmp/openclaw.json",
+    });
   });
 
   it("applies only the wizard delta to a fresh concurrent config", async () => {
@@ -209,10 +231,13 @@ describe("writeWizardConfigFile", () => {
       plugins: { entries: { demo: { enabled: true } } },
     };
 
-    await expect(writeWizardConfigFile(next, { mergeBase: base })).resolves.toEqual({
-      agents: { defaults: { workspace: "/concurrent" } },
-      gateway: { port: 19001 },
-      plugins: { entries: { demo: { enabled: true } } },
+    await expect(writeWizardConfigFile(next, { mergeBase: base })).resolves.toMatchObject({
+      path: "/tmp/openclaw.json",
+      nextConfig: {
+        agents: { defaults: { workspace: "/concurrent" } },
+        gateway: { port: 19001 },
+        plugins: { entries: { demo: { enabled: true } } },
+      },
     });
   });
 
@@ -298,15 +323,14 @@ describe("writeWizardConfigFile", () => {
       },
     );
 
-    await expect(
-      writeWizardConfigFile(next, {
-        mergeBase: base,
-        writeOptions: {
-          explicitSetPaths: [["plugins", "entries", "demo", "config", "callerOwned"]],
-          explicitSetValueSource,
-        },
-      }),
-    ).resolves.toEqual({
+    const committed = await writeWizardConfigFile(next, {
+      mergeBase: base,
+      writeOptions: {
+        explicitSetPaths: [["plugins", "entries", "demo", "config", "callerOwned"]],
+        explicitSetValueSource,
+      },
+    });
+    expect(committed.nextConfig).toEqual({
       plugins: {
         entries: {
           demo: {
