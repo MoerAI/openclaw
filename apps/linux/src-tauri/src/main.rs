@@ -3,7 +3,7 @@ mod discovery;
 mod gateway;
 mod gateway_device_identity;
 mod gateway_operation_queue;
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 mod gateway_sleep;
 #[cfg(target_os = "linux")]
 mod gateway_sleep_logind;
@@ -23,7 +23,7 @@ use cli::{CliError, OpenClawCli};
 use gateway::{GatewayAction, GatewaySnapshot, ReadyGateway};
 use gateway_operation_queue::{GatewayOperation, GatewayOperationQueue};
 use installer::InstallChannel;
-use remote_gateway::RemoteGatewayRequest;
+use remote_gateway::{RemoteConnectionSource, RemoteGatewayRequest};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -86,6 +86,23 @@ fn native_auth_initialization_script(
     ))
 }
 
+fn remote_ws_config(
+    request: &RemoteGatewayRequest,
+    gateway_url: &Url,
+) -> gateway_ws::GatewayWsConfig {
+    gateway_ws::GatewayWsConfig::new(
+        gateway_url.to_string(),
+        request.token.clone(),
+        request.password.clone(),
+        if gateway_url.scheme() == "wss" {
+            request.tls_fingerprint.clone()
+        } else {
+            None
+        },
+        gateway_ws::GatewayOwnership::Remote,
+    )
+}
+
 fn open_external_browser(app: &AppHandle, url: &Url) {
     if external_browser_url_allowed(url)
         && app.opener().open_url(url.as_str(), None::<&str>).is_err()
@@ -107,7 +124,7 @@ fn is_active_onboarding_url(url: &Url) -> bool {
         .find(|(key, _)| key == query_key)
         .is_some_and(|(_, value)| {
             if query_key == "firstRun" {
-                return value == "1";
+                return value == "1" || value == "explicit";
             }
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -344,11 +361,20 @@ impl NavigationState {
             Url::parse(target).map_err(|_| "Dashboard returned an invalid URL.".to_string())?;
         if self.onboarding_pending {
             // Setup owns inference before chat; preserve Gateway base paths and fragment auth.
+            // Saved first-run links may use either marker; new links use explicit.
             url.path_segments_mut()
                 .map_err(|_| "Dashboard returned an invalid URL.".to_string())?
                 .pop_if_empty()
                 .extend(["settings", "model-setup"]);
-            url.query_pairs_mut().append_pair("firstRun", "1");
+            let existing_query = url
+                .query_pairs()
+                .filter(|(key, _)| key != "firstRun")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            url.query_pairs_mut()
+                .clear()
+                .extend_pairs(existing_query)
+                .append_pair("firstRun", "explicit");
             self.onboarding_pending = false;
         }
         Ok(url)
@@ -361,7 +387,7 @@ struct DesktopInner {
     operation: Mutex<()>,
     pending_approvals: Mutex<pending_approvals::PendingApprovalState>,
     local_url: Url,
-    tray: Mutex<Option<tray::TrayHandles>>,
+    tray: Mutex<Option<Arc<tray::TrayHandles>>>,
     remote_tunnel: Mutex<Option<remote_gateway::SshTunnel>>,
     quitting: AtomicBool,
 }
@@ -388,19 +414,23 @@ impl DesktopState {
     }
 
     fn set_tray(&self, handles: tray::TrayHandles) {
-        *self.inner.tray.lock().expect("tray mutex poisoned") = Some(handles);
+        *self.inner.tray.lock().expect("tray mutex poisoned") = Some(Arc::new(handles));
+    }
+
+    fn with_tray(&self, update: impl FnOnce(&tray::TrayHandles)) {
+        let tray = self.inner.tray.lock().expect("tray mutex poisoned").clone();
+        // Menu setters synchronously dispatch to the main thread.
+        if let Some(tray) = tray {
+            update(&tray);
+        }
     }
 
     pub(crate) fn set_quickchat_shortcut_checked(&self, checked: bool) {
-        if let Some(tray) = self
-            .inner
-            .tray
-            .lock()
-            .expect("tray mutex poisoned")
-            .as_ref()
-        {
-            tray.set_quickchat_shortcut_checked(checked);
-        }
+        self.with_tray(|tray| tray.set_quickchat_shortcut_checked(checked));
+    }
+
+    pub(crate) fn refresh_update_action(&self, app: &AppHandle) {
+        self.with_tray(|tray| tray.refresh_update_action(app));
     }
 
     pub fn connect(&self, app: &AppHandle) -> Result<GatewaySnapshot, String> {
@@ -419,7 +449,7 @@ impl DesktopState {
             .map_err(|_| "Gateway operation lock is unavailable.".to_string())?;
         if !explicit_local {
             if let Some(remote) = remote_gateway::load_saved_remote()? {
-                return self.connect_remote_locked(app, remote);
+                return self.connect_remote_locked(app, remote, RemoteConnectionSource::Saved);
             }
         }
         let cli = self.resolve_cli();
@@ -579,13 +609,14 @@ impl DesktopState {
             .operation
             .lock()
             .map_err(|_| "Gateway operation lock is unavailable.".to_string())?;
-        self.connect_remote_locked(app, request)
+        self.connect_remote_locked(app, request, RemoteConnectionSource::Submitted)
     }
 
     fn connect_remote_locked(
         &self,
         app: &AppHandle,
         mut request: RemoteGatewayRequest,
+        source: RemoteConnectionSource,
     ) -> Result<GatewaySnapshot, String> {
         remote_gateway::validate_request(&request)?;
         let mut active_tunnel = self
@@ -612,23 +643,17 @@ impl DesktopState {
         remote_gateway::resolve_remote_tls_fingerprint(&mut request, &gateway_url)?;
         let target = remote_gateway::dashboard_url(&gateway_url)?;
         let script = native_auth_initialization_script(&target, &gateway_url, &request)?;
-        remote_gateway::save_config_at(&remote_gateway::config_path()?, &request, &gateway_url)?;
+        remote_gateway::save_config_at(
+            &remote_gateway::config_path()?,
+            &request,
+            &gateway_url,
+            source,
+        )?;
         *active_tunnel = tunnel;
         drop(active_tunnel);
 
-        app.state::<gateway_ws::GatewayClient>().configure(
-            app,
-            gateway_ws::GatewayWsConfig::new(
-                gateway_url.to_string(),
-                request.token.clone(),
-                request.password.clone(),
-                if gateway_url.scheme() == "wss" {
-                    request.tls_fingerprint.clone()
-                } else {
-                    None
-                },
-            ),
-        );
+        app.state::<gateway_ws::GatewayClient>()
+            .configure(app, remote_ws_config(&request, &gateway_url));
         self.navigate_authenticated_remote(app, target, script)?;
         let snapshot = GatewaySnapshot {
             phase: "connected",
@@ -744,15 +769,7 @@ impl DesktopState {
     }
 
     fn update_tray(&self, snapshot: &GatewaySnapshot) {
-        if let Some(tray) = self
-            .inner
-            .tray
-            .lock()
-            .expect("tray mutex poisoned")
-            .as_ref()
-        {
-            tray.update(snapshot);
-        }
+        self.with_tray(|tray| tray.update(snapshot));
     }
 
     fn show_missing_cli(
@@ -801,15 +818,7 @@ impl DesktopState {
             .lock()
             .expect("pending approval mutex poisoned")
             .update(pending);
-        if let Some(tray) = self
-            .inner
-            .tray
-            .lock()
-            .expect("tray mutex poisoned")
-            .as_ref()
-        {
-            tray.update_pending_count(diff.count);
-        }
+        self.with_tray(|tray| tray.update_pending_count(diff.count));
         if !main_window(app).is_ok_and(|window| matches!(window.is_focused(), Ok(false))) {
             return;
         }
@@ -1028,6 +1037,10 @@ mod navigation_tests {
         for (url, preserve) in [
             ("http://127.0.0.1/settings/model-setup?firstRun=1", true),
             (
+                "http://127.0.0.1/settings/model-setup?firstRun=explicit",
+                true,
+            ),
+            (
                 "http://127.0.0.1/openclaw/settings/model-setup/?tab=ai&firstRun=1#token=redacted",
                 true,
             ),
@@ -1120,11 +1133,13 @@ mod navigation_tests {
         navigation.mark_onboarding_pending();
 
         let url = navigation
-            .prepare_dashboard_url("http://127.0.0.1:18789/openclaw/?foo=bar#token=secret")
+            .prepare_dashboard_url(
+                "http://127.0.0.1:18789/openclaw/?foo=bar&firstRun=1#token=secret",
+            )
             .expect("dashboard URL");
 
         assert_eq!(url.path(), "/openclaw/settings/model-setup");
-        assert_eq!(url.query(), Some("foo=bar&firstRun=1"));
+        assert_eq!(url.query(), Some("foo=bar&firstRun=explicit"));
         assert_eq!(url.fragment(), Some("token=secret"));
     }
 
@@ -1141,7 +1156,7 @@ mod navigation_tests {
             .expect("second dashboard URL");
 
         assert_eq!(first.path(), "/settings/model-setup");
-        assert_eq!(first.query(), Some("firstRun=1"));
+        assert_eq!(first.query(), Some("firstRun=explicit"));
         assert!(is_active_onboarding_url(&first));
         assert_eq!(second.path(), "/");
         assert_eq!(second.query(), None);

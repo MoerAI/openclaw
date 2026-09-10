@@ -3,8 +3,10 @@ import type { DevicePlacementRequirement } from "../../agents/harness/types.js";
 import type {
   WorkerDesktopApp,
   WorkerMachineOption,
+  WorkerOperatingSystem,
   WorkerProfile,
 } from "../../plugins/capability-provider.types.js";
+import type { DesktopObserveRequester } from "../desktop/observe-requester.js";
 import type {
   WorkerPlacementMoveSource,
   WorkerPlacementMoveTarget,
@@ -47,6 +49,7 @@ export type WorkerEnvironmentServiceRecord = {
   desktopAvailable: boolean;
   desktopApps: readonly WorkerDesktopApp["id"][];
   tunnelStatus: WorkerTunnelStatus;
+  preparation?: { purpose: "reserve" | "build"; key: string } | null;
   error?: string;
 };
 
@@ -70,17 +73,27 @@ export type WorkerEnvironmentServiceContract = {
   inventoryVersion(): number;
   supportsExecutionMode(profileId: string, mode: WorkerPlacementExecutionMode): boolean;
   listMachineOptions(profileId: string): Promise<readonly WorkerMachineOption[] | undefined>;
+  listOperatingSystems(profileId: string): Promise<readonly WorkerOperatingSystem[] | undefined>;
+  prepare(
+    request: { profileId: string; projectPath: string },
+    authorize?: () => void,
+  ): Promise<{ environmentId: string; preparationKey: string; reused: boolean }>;
   create(
     profileId: string,
     idempotencyKey: string,
     machineClass?: string,
     executionMode?: WorkerPlacementExecutionMode,
+    projectPath?: string,
+    signal?: AbortSignal,
+    os?: string,
+    runSetupScript?: boolean,
   ): Promise<WorkerEnvironmentServiceRecord>;
   destroy(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
   destroyUnattached(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
   observeDesktop(request: {
     environmentId: string;
     control: boolean;
+    requester?: DesktopObserveRequester;
   }): Promise<WorkerDesktopObserveResult>;
   launchDesktopApp(request: {
     environmentId: string;
@@ -102,6 +115,7 @@ export type WorkerPlacementDispatchRequest = {
   idempotencyKey?: string;
   deviceId?: string;
   machineClass?: string;
+  os?: string;
   inheritedProfile?: {
     providerId: string;
     profileSnapshot: WorkerProfile;
@@ -126,6 +140,7 @@ export type WorkerPlacementMoveDestination = Pick<
   | "devicePlacement"
   | "deviceId"
   | "machineClass"
+  | "os"
   | "inheritedProfile"
 >;
 

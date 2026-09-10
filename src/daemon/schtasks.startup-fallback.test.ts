@@ -12,6 +12,7 @@ import {
 } from "../infra/windows-install-roots.js";
 import { decodeWindowsLauncherScript } from "../infra/windows-launcher-encoding.js";
 import "./test-helpers/schtasks-base-mocks.js";
+import { runScheduledTaskOrThrow } from "./schtasks-control.js";
 import type { GatewayServiceRuntime } from "./service-runtime.js";
 
 vi.mock("../infra/windows-encoding.js", async () => {
@@ -706,7 +707,7 @@ describe("Windows startup fallback", () => {
       expect(startupScript).toContain("WScript.Shell");
       expect(startupScript).toContain("gateway.cmd");
       expect(startupScript).toContain(
-        `WScript.Quit CreateObject("WScript.Shell").Run("""${result.scriptPath}""", 0, True)`,
+        `WScript.Quit shell.Run("""${result.scriptPath}""", 0, True)`,
       );
       expectStartupFallbackSpawn();
     });
@@ -1708,6 +1709,31 @@ describe("Windows startup fallback", () => {
 
       await fs.access(resolveStartupEntryPath(env));
       expectStartupFallbackSpawn();
+    });
+  });
+
+  it("revalidates activation authority after asynchronous baseline preparation", async () => {
+    await withWindowsEnv("openclaw-win-startup-", async ({ env }) => {
+      await writeGatewayScript(env);
+      const revoked = new Error("operation replaced");
+      let current = true;
+      gatewayServiceProbeHostsMock.mockImplementationOnce(async () => {
+        current = false;
+        return ["127.0.0.1"];
+      });
+      await expect(
+        runScheduledTaskOrThrow({
+          taskName: "OpenClaw Gateway",
+          env,
+          scriptPath: resolveTaskScriptPath(env),
+          assertCurrent: () => {
+            if (!current) {
+              throw revoked;
+            }
+          },
+        }),
+      ).rejects.toBe(revoked);
+      expect(schtasksCalls).toEqual([]);
     });
   });
 
