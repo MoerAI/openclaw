@@ -689,13 +689,14 @@ export function resolveMemoryDreamingWorkspaces(
     addWorkspace(resolveAgentWorkspaceDir(cfg, agentId, options.env), agentId);
   }
   const primaryWorkspaceDir = options.primaryWorkspaceDir?.trim();
+  const primaryAgentId = normalizeOptionalLowercaseString(options.primaryAgentId);
   // The roster already owns known paths; only a new or explicit association needs an owner.
   if (
     primaryWorkspaceDir &&
-    (options.primaryAgentId != null ||
+    (primaryAgentId ||
       !byWorkspace.has(resolveWorkspaceStateIdentity(primaryWorkspaceDir).workspacePath))
   ) {
-    addWorkspace(primaryWorkspaceDir, options.primaryAgentId ?? resolveDefaultAgentId(cfg));
+    addWorkspace(primaryWorkspaceDir, primaryAgentId ?? resolveDefaultAgentId(cfg));
   }
   return [...byWorkspace.values()];
 }

@@ -298,7 +298,7 @@ describe("memory dreaming host helpers", () => {
       { workspaceDir: beta, agentIds: ["beta"] },
     ];
     for (const primaryWorkspaceDir of [alpha, alias]) {
-      for (const primaryAgentId of [undefined, null]) {
+      for (const primaryAgentId of [undefined, null, "", " \t "]) {
         expect(
           resolveMemoryDreamingWorkspaces(cfg, { primaryWorkspaceDir, primaryAgentId }),
         ).toEqual(expected);
