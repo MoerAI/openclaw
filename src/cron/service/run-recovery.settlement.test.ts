@@ -10,15 +10,14 @@ import { setupCronServiceSuite, writeCronStoreSnapshot } from "../service.test-h
 import { loadCronStore } from "../store.js";
 import { cronStoreKey } from "../store/key.js";
 import {
-  claimCronRunReceiptInDatabase,
   prepareCronRunReceiptClaim,
   releaseLocalCronRunReceiptOwnership,
 } from "../store/run-receipt-store.js";
 import {
+  claimCronRunReceiptInDatabaseForTest,
   inspectActiveCronRunReceipt,
   makeCronRecoveryJob,
 } from "../store/run-receipt-store.test-support.js";
-import { prepareCronRunReceiptWriteSchema } from "../store/run-receipt-write-admission.js";
 import { stop } from "./ops-lifecycle.js";
 import { ensureLoadedForRead } from "./ops-shared.js";
 import { recoverCronRunProposals } from "./run-recovery.js";
@@ -64,11 +63,16 @@ it("publishes every committed batch repair once after reply loss", async () => {
   await writeCronStoreSnapshot({ storePath, jobs });
   for (const job of jobs) {
     const startedAtMs = job.state.runningAtMs!;
-    const prepared = prepareCronRunReceiptClaim({ storePath, job, agentId: "alpha", startedAtMs });
+    const prepared = prepareCronRunReceiptClaim({
+      observed: undefined,
+      storePath,
+      job,
+      agentId: "alpha",
+      startedAtMs,
+    });
     const receipt = runOpenClawStateWriteTransaction(({ db }) =>
-      claimCronRunReceiptInDatabase({
+      claimCronRunReceiptInDatabaseForTest({
         database: db,
-        receiptSchema: prepareCronRunReceiptWriteSchema(db),
         prepared,
         resolveAgentId: () => "alpha",
       }),
