@@ -3,16 +3,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EmbeddedRunAttemptParamsV2 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type {
+  OpenAsyncKeyedStoreOptions,
+  OpenKeyedStoreOptions,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
+  createPluginStateKeyedStoreForTests,
   createPluginStateSyncKeyedStoreForTests,
-  resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { createTestPluginApi, type TestPluginApiInput } from "openclaw/plugin-sdk/plugin-test-api";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { ensureAuthProfileStore, resolveAuthProfileOrder } from "openclaw/plugin-sdk/provider-auth";
 import { resolveProviderIdForAuth } from "openclaw/plugin-sdk/provider-auth-aliases";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import plugin from "../../index.js";
 import { CodexAppServerClient } from "./client.js";
 import { resolveCodexSupervisionAppServerRuntimeOptions } from "./config.js";
@@ -32,18 +35,24 @@ import {
   CODEX_APP_SERVER_BINDING_NAMESPACE,
   createCodexAppServerBindingStore,
   sessionBindingIdentity,
-  type StoredCodexAppServerBinding,
 } from "./session-binding.js";
+import { createCodexRuntimeTestBindingStateStore } from "./session-binding.sqlite.test-helpers.js";
 import { attachSqliteSessionTarget } from "./sqlite-session.test-helpers.js";
 import { createClientHarness } from "./test-support.js";
 import { codexDynamicToolsFingerprint } from "./thread-fingerprints.js";
 
 setupRunAttemptTestHooks();
-afterEach(() => resetPluginStateStoreForTests());
 
 describe("registered Codex harness model attribution", () => {
-  it("reports the ready native model and current-turn reroutes before settlement", async () => {
+  it.each(["completed", "timed out"] as const)("attributes models (%s)", async (outcome) => {
+    // Protocol events own completion; host load must not spend the attempt watchdog.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const params = createTestParams();
+    // Supervision replaces the helper model; this fixture supplies no host tools.
+    params.hostCapabilities = Object.freeze({
+      ...params.hostCapabilities,
+      createToolSurface: () => [],
+    });
     params.agentDir = path.join(tempDir, "agent");
     params.provider = "anthropic";
     params.modelId = "picker-model";
@@ -75,8 +84,14 @@ describe("registered Codex harness model attribution", () => {
         ...options,
         env: { ...process.env, OPENCLAW_STATE_DIR: path.join(tempDir, "plugin-state") },
       });
+    const openKeyedStore = <T>(options: OpenAsyncKeyedStoreOptions) =>
+      createPluginStateKeyedStoreForTests<T>("codex", {
+        ...options,
+        env: { ...process.env, OPENCLAW_STATE_DIR: path.join(tempDir, "plugin-state") },
+      });
+    const stateRuntime = { state: { openSyncKeyedStore, openKeyedStore } };
     const bindingStore = createCodexAppServerBindingStore(
-      openSyncKeyedStore<StoredCodexAppServerBinding>({
+      createCodexRuntimeTestBindingStateStore(stateRuntime, {
         namespace: CODEX_APP_SERVER_BINDING_NAMESPACE,
         maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
         overflowPolicy: "reject-new",
@@ -106,12 +121,13 @@ describe("registered Codex harness model attribution", () => {
         ),
       },
     });
+    let nativeModel = "ready-native-model";
     const readyThread = {
       ...threadStartResult("native-thread", { cwd: params.workspaceDir }),
       model: "ready-native-model",
       modelProvider: "openai",
     };
-    const turnStarted = createDeferred<void>();
+    let turnStarted = createDeferred<void>();
     const requests: Array<{ method: string; params: unknown }> = [];
     const transport = createClientHarness({
       onWrite(line, send) {
@@ -139,7 +155,7 @@ describe("registered Codex harness model attribution", () => {
             result = { config: { model_provider: "openai" }, origins: {} };
             break;
           case "thread/read":
-            result = { thread: { ...readyThread.thread, path: rolloutPath } };
+            result = { thread: { ...readyThread.thread, model: nativeModel, path: rolloutPath } };
             break;
           case "thread/resume":
             send({
@@ -152,6 +168,20 @@ describe("registered Codex harness model attribution", () => {
             result = turnStartResult();
             turnStarted.resolve();
             break;
+          case "turn/interrupt":
+            queueMicrotask(() =>
+              send({
+                method: "turn/completed",
+                params: {
+                  threadId: "native-thread",
+                  turn: { id: "turn-1", status: "interrupted", items: [] },
+                },
+              }),
+            );
+            break;
+          case "thread/backgroundTerminals/list":
+            result = { data: [], nextCursor: null };
+            break;
           case "thread/unsubscribe":
             result = { status: "unsubscribed" };
             break;
@@ -163,7 +193,7 @@ describe("registered Codex harness model attribution", () => {
     const runtime = createPluginRuntimeMock({
       modelAuth: { ensureAuthProfileStore, resolveAuthProfileOrder, resolveProviderIdForAuth },
       config: { current: () => ({ plugins: { entries: { codex: { config: pluginConfig } } } }) },
-      state: { openSyncKeyedStore },
+      state: stateRuntime.state,
     });
     const registerAgentHarness = vi.fn<NonNullable<TestPluginApiInput["registerAgentHarness"]>>();
     plugin.register(
@@ -197,6 +227,7 @@ describe("registered Codex harness model attribution", () => {
       data: { phase: "model", provider: "openai", model: "rerouted-model" },
     };
     const run = registered.runAttempt(params);
+    let next: typeof run | undefined;
     try {
       await Promise.race([
         turnStarted.promise,
@@ -228,27 +259,39 @@ describe("registered Codex harness model attribution", () => {
           data: { fromModel: "ready-native-model", toModel: "rerouted-model", reason: "other" },
         },
       ]);
-      transport.send({
-        method: "turn/completed",
-        params: {
-          threadId: "native-thread",
-          turn: {
-            id: "turn-1",
-            status: "completed",
-            items: [{ type: "agentMessage", id: "answer", text: "Native answer." }],
+      if (outcome === "timed out") {
+        await vi.advanceTimersByTimeAsync(params.timeoutMs);
+      } else {
+        transport.send({
+          method: "turn/completed",
+          params: {
+            threadId: "native-thread",
+            turn: {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "agentMessage", id: "answer", text: "Native answer." }],
+            },
           },
-        },
-      });
+        });
+      }
       const result = await run;
-      expect(result).toHaveProperty("terminal", { kind: "ok" });
+      if (outcome === "completed") {
+        expect(result).toHaveProperty("terminal", { kind: "ok" });
+      } else {
+        expect(result).toMatchObject({ terminal: { kind: "timeout", aborted: true } });
+        expect(requests).toContainEqual({
+          method: "thread/backgroundTerminals/list",
+          params: { threadId: "native-thread" },
+        });
+      }
       expect(result.runtimeModelSelection).toEqual({
         provider: "openai",
         model: "ready-native-model",
       });
-      expect(result.assistantTexts).toEqual(["Native answer."]);
+      expect(result.assistantTexts).toEqual(outcome === "completed" ? ["Native answer."] : []);
       expect(
         events.filter((event) => event.stream === "lifecycle").map((event) => event.data.phase),
-      ).toEqual(["start", "model", "model", "end"]);
+      ).toEqual(["start", "model", "model", outcome === "completed" ? "end" : "error"]);
       for (const method of ["thread/resume", "turn/start"]) {
         const matching = requests.filter((request) => request.method === method);
         expect(matching).toHaveLength(1);
@@ -259,11 +302,53 @@ describe("registered Codex harness model attribution", () => {
         expect(request.params).not.toHaveProperty("model");
         expect(request.params).not.toHaveProperty("modelProvider");
       }
+      if (outcome === "completed") {
+        nativeModel = "changed-native-model";
+        turnStarted = createDeferred<void>();
+        next = registered.runAttempt({ ...params, runId: "native-second-turn" });
+        await Promise.race([
+          turnStarted.promise,
+          next.then((earlyResult) => {
+            throw new Error("Second attempt ended before turn/start", { cause: earlyResult });
+          }),
+        ]);
+        transport.send({
+          method: "turn/completed",
+          params: {
+            threadId: "native-thread",
+            turn: {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "agentMessage", id: "second-answer", text: "Second native answer." }],
+            },
+          },
+        });
+        const second = await next;
+        expect(second).toHaveProperty("terminal", { kind: "ok" });
+        expect(second.assistantTexts).toEqual(["Second native answer."]);
+        expect(second.runtimeModelSelection).toEqual({ provider: "openai", model: nativeModel });
+        expect(second.currentAttemptAssistant).toMatchObject({
+          provider: "openai",
+          model: nativeModel,
+        });
+        expect(bindingStore.read(sessionBindingIdentity(params))).toMatchObject({
+          model: nativeModel,
+        });
+        expect(requests.filter(({ method }) => method === "thread/resume")).toHaveLength(1);
+        expect(requests.filter(({ method }) => method === "thread/unsubscribe")).toHaveLength(0);
+        expect(requests.filter(({ method }) => method === "thread/inject_items")).toHaveLength(1);
+      }
     } finally {
       abort.abort("test cleanup");
-      await transport.client.closeAndWait();
-      await Promise.allSettled([run]);
-      await registered.dispose?.();
+      try {
+        // Restoring clocks first discards the pending relay-replacement listener-close timer.
+        await vi.runOnlyPendingTimersAsync();
+      } finally {
+        vi.useRealTimers();
+        await transport.client.closeAndWait();
+        await Promise.allSettled([run, next]);
+        await registered.dispose?.();
+      }
     }
   });
 });
