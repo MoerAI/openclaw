@@ -9,6 +9,7 @@ import { prepareInternalSessionEffectsSession } from "../../agents/internal-sess
 import { ensureSessionGroupCatalog } from "../../gateway/session-group-catalog.js";
 import { ensureSessionGroupRegistered, listSessionGroups } from "../../gateway/session-groups.js";
 import { prepareSessionMutationFacts } from "../../gateway/session-sharing-preparation.js";
+import { acquireStateDatabaseSchemaLease } from "../../infra/gateway-state-owner.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import {
   markPluginRegistryActive,
@@ -96,16 +97,19 @@ it("creates with prepared label facts, header and atomic owner without host data
         { agentId: "main", storePath, sessionKey: key, env },
         async (snapshot) => {
           expect(snapshot.existingEntry).toBeUndefined();
-          expect(snapshot.labelInUse).toBe(true);
+          expect(snapshot.labelInUse).toBe(false);
           env.OPENCLAW_STATE_DIR = state.statePath("changed-during-preparation");
           assertCreation();
           await Promise.resolve();
           assertCreation();
-          expect(snapshot.labelInUse).toBe(true);
-          return { ok: true, entry: { sessionId: "created", updatedAt: 2, category: "Created" } };
+          expect(snapshot.labelInUse).toBe(false);
+          return {
+            ok: true,
+            entry: { sessionId: "created", updatedAt: 2, category: "Created", label: "available" },
+          };
         },
         {
-          label: "taken",
+          label: "available",
           bindCreation: (operation) => {
             prepared.bindCreation(operation);
             assertCreation = () =>
@@ -137,7 +141,10 @@ it("creates with prepared label facts, header and atomic owner without host data
           },
         },
       );
-      expect(result).toMatchObject({ ok: true, entry: { sessionId: "created" } });
+      expect(result).toMatchObject({
+        ok: true,
+        entry: { sessionId: "created", label: "available" },
+      });
       const writes = post.mock.calls.flatMap(([request]) => {
         if (
           !isRecord(request) ||
@@ -272,10 +279,15 @@ it.each(["incognito", "maintenance"] as const)(
             : "agent:main:native-maintenance",
       };
       const database = openOpenClawAgentDatabase(toDatabaseOptions(resolveSqliteScope(scope)));
-      const maintenance =
-        kind === "maintenance"
-          ? createOpenClawDatabaseMaintenanceScope(() => undefined)
-          : undefined;
+      const schemaLease =
+        kind === "maintenance" ? acquireStateDatabaseSchemaLease(database.path) : undefined;
+      const maintenance = schemaLease
+        ? createOpenClawDatabaseMaintenanceScope({
+            schemaMaintenance: true,
+            assertOwnerCurrent: () => schemaLease.assertCurrent(),
+            assertDatabaseAccess: schemaLease.assertDatabaseAccess,
+          })
+        : undefined;
       let followed = false;
       const create = () =>
         createSessionEntryWithTranscript(
@@ -297,7 +309,11 @@ it.each(["incognito", "maintenance"] as const)(
         expect((await (maintenance ? maintenance.run(create) : create())).ok).toBe(true);
         expect(followed).toBe(true);
       } finally {
-        await maintenance?.close();
+        try {
+          await maintenance?.close();
+        } finally {
+          schemaLease?.release();
+        }
       }
     });
   },

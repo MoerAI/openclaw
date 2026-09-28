@@ -1,11 +1,13 @@
 import { getSqliteWorkerStateContext } from "../../infra/sqlite-worker-state-context.js";
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
-import type { CronJobPolicyContext, Logger } from "../service/state.js";
+import type { CronJobPolicyContext } from "../service/state.js";
 import { loadedCronStoreFromRows, loadCronRows } from "./row-codec.js";
+import { prepareCronRunReceiptWriteSchema } from "./run-receipt-write-admission.js";
 import { repairCronRunInDatabase } from "./run-recovery.kernel.js";
 import type { CronRunRecoveryOutcome } from "./run-recovery.types.js";
 import {
+  createCronMutationLogger,
   prepareCronRuntimeMutation,
   retainCronRuntimeMutationOutcome,
 } from "./runtime-mutation.worker.js";
@@ -17,6 +19,7 @@ export function repairCronRunsInWorker(
 ): CronRuntimeWorkerOperations["cron.repairRuns"]["output"] {
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
+      const receiptSchema = prepareCronRunReceiptWriteSchema(db);
       const rows = loadCronRows(
         db,
         input.storeKey,
@@ -40,25 +43,18 @@ export function repairCronRunsInWorker(
         const row = rowsById.get(proposal.jobId);
         const preparation = preparations[index]!;
         const logs: CronRunRecoveryOutcome["logs"] = [];
-        const record = (level: keyof Logger) => (fields: unknown, message?: string) => {
-          logs.push({ level, fields, message });
-        };
         const state: CronJobPolicyContext = {
           deps: {
             nowMs: () => preparation.nowMs,
             cronConfig: preparation.cronConfig,
-            log: {
-              debug: record("debug"),
-              info: record("info"),
-              warn: record("warn"),
-              error: record("error"),
-            },
+            log: createCronMutationLogger(logs),
           },
           preparedFailureAlert: { jobId: proposal.jobId, value: preparation.failureAlert },
         };
         return {
           result: repairCronRunInDatabase({
             database,
+            receiptSchema,
             row,
             job,
             storeKey: input.storeKey,

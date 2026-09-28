@@ -4,6 +4,7 @@ import { hydrateOpenClawStateWorkerError } from "../state/openclaw-state-worker-
 import { SqliteWorkerBroker } from "./sqlite-worker-broker.js";
 import type {
   SqliteWorkerInputPreparation,
+  SqliteWorkerInputRetention,
   SqliteWorkerOpenCustody,
   SqliteWorkerStoreOptions,
 } from "./sqlite-worker-broker.types.js";
@@ -11,7 +12,6 @@ import {
   SqliteWorkerError,
   type SqliteWorkerOperations,
   type SqliteWorkerStore,
-  type SqliteWorkerStateLifecycle,
 } from "./sqlite-worker-contract.js";
 import {
   createSqliteWorkerOperationAdmission,
@@ -56,7 +56,6 @@ export function runSqliteWorkerStoreOperation<Operations extends SqliteWorkerOpe
   stateContext?: SqliteWorkerStateContext,
   assertCurrent?: (commandType: PropertyKey) => void,
   createAdmission?: SqliteWorkerAdmissionFactory,
-  requireStateLifecycle: SqliteWorkerStateLifecycle = false,
 ): Promise<T> {
   return withCallerErrors(
     resolveSqliteWorkerBroker().runOperation(
@@ -65,7 +64,6 @@ export function runSqliteWorkerStoreOperation<Operations extends SqliteWorkerOpe
       stateContext,
       assertCurrent,
       createAdmission,
-      requireStateLifecycle,
     ),
   );
 }
@@ -81,8 +79,11 @@ function resolveSqliteWorkerBroker() {
 export type { SqliteWorkerInputPreparation } from "./sqlite-worker-broker.types.js";
 
 /** Charge captured input before actor preparation can yield, then hand it to normal dispatch. */
-export function reserveSqliteWorkerInputPreparation(bytes: number): SqliteWorkerInputPreparation {
-  return resolveSqliteWorkerBroker().reserveInputPreparation(bytes);
+export function reserveSqliteWorkerInputPreparation(
+  bytes: number,
+  retention: SqliteWorkerInputRetention = "stream",
+): SqliteWorkerInputPreparation {
+  return resolveSqliteWorkerBroker().reserveInputPreparation(bytes, retention);
 }
 
 /**
