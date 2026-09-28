@@ -232,42 +232,65 @@ it("commits a recovery batch before publishing its first result", async () => {
   expect(persisted.jobs.map((job) => job.state.lastRunStatus)).toEqual(["error", "error"]);
 });
 
-it("publishes every committed batch result before surfacing a listener failure", async () => {
-  const { storePath } = await makeStorePath();
-  const startedAtMs = Date.parse("2026-08-13T14:00:00.000Z");
-  const jobs = [
-    makeCronRecoveryJob("batch-first", startedAtMs),
-    makeCronRecoveryJob("batch-second", startedAtMs + 1),
-  ];
-  await writeCronStoreSnapshot({ storePath, jobs });
-  const receipts = jobs.map((job, index) =>
-    claimCronRecoveryReceipt(storePath, job, startedAtMs + index),
-  );
-  for (const receipt of receipts) {
-    releaseLocalCronRunReceiptOwnership(receipt);
-  }
-  const state = makeCronRecoveryState(logger, storePath, startedAtMs + 30_000);
-  const proposals = await Promise.all(
-    jobs.map((job, index) =>
-      observeCronRecoveryForTest(state, job.id, undefined, startedAtMs + index),
-    ),
-  );
-  const results: string[] = [];
-  const failure = new Error("recovery listener failed");
+it.each(["listener", "logger"] as const)(
+  "publishes every committed batch result before surfacing a %s failure",
+  async (failing) => {
+    const { storePath } = await makeStorePath();
+    const startedAtMs = Date.parse("2026-08-13T14:00:00.000Z");
+    const jobs = [
+      makeCronRecoveryJob("batch-first", startedAtMs),
+      makeCronRecoveryJob("batch-second", startedAtMs + 1),
+    ];
+    await writeCronStoreSnapshot({ storePath, jobs });
+    const receipts = jobs.map((job, index) =>
+      claimCronRecoveryReceipt(storePath, job, startedAtMs + index),
+    );
+    for (const receipt of receipts) {
+      releaseLocalCronRunReceiptOwnership(receipt);
+    }
+    const state = makeCronRecoveryState(logger, storePath, startedAtMs + 30_000);
+    const proposals = await Promise.all(
+      jobs.map((job, index) =>
+        observeCronRecoveryForTest(state, job.id, undefined, startedAtMs + index),
+      ),
+    );
+    const results: string[] = [];
+    const failure = new Error(`recovery ${failing} failed`);
+    // Arm after the first result is published so the throw lands in that result's log replay.
+    let loggerArmed = false;
+    const levels = ["debug", "info", "warn", "error"] as const;
+    if (failing === "logger") {
+      for (const level of levels) {
+        logger[level].mockImplementation(() => {
+          if (loggerArmed) {
+            loggerArmed = false;
+            throw failure;
+          }
+        });
+      }
+    }
 
-  await expect(
-    recoverCronRunProposals(state, proposals, {
-      mode: "startup",
-      onRecovery(proposal, result) {
-        results.push(`${proposal.jobId}:${result.kind}`);
-        if (results.length === 1) {
-          throw failure;
-        }
-      },
-    }),
-  ).rejects.toBe(failure);
+    try {
+      await expect(
+        recoverCronRunProposals(state, proposals, {
+          mode: "startup",
+          onRecovery(proposal, result) {
+            results.push(`${proposal.jobId}:${result.kind}`);
+            if (results.length === 1 && failing === "listener") {
+              throw failure;
+            }
+            loggerArmed = results.length === 1;
+          },
+        }),
+      ).rejects.toBe(failure);
+    } finally {
+      for (const level of levels) {
+        logger[level].mockReset();
+      }
+    }
 
-  expect(results).toEqual(["batch-first:repaired", "batch-second:repaired"]);
-  const persisted = await loadCronStore(storePath);
-  expect(persisted.jobs.map((job) => job.state.lastRunStatus)).toEqual(["error", "error"]);
-});
+    expect(results).toEqual(["batch-first:repaired", "batch-second:repaired"]);
+    const persisted = await loadCronStore(storePath);
+    expect(persisted.jobs.map((job) => job.state.lastRunStatus)).toEqual(["error", "error"]);
+  },
+);

@@ -185,7 +185,7 @@ async function repairRecoveryProposals(
           noteCronJobsStoreCommit(input.storeKey);
         }
         // The whole batch is committed and settled before publication, so a failing
-        // listener cannot skip later results; surface its failure afterwards.
+        // listener or logger cannot skip later results; surface its failure afterwards.
         const failures: unknown[] = [];
         for (const [index, entry] of outcome.outcomes.entries()) {
           try {
@@ -194,7 +194,11 @@ async function repairRecoveryProposals(
             failures.push(error);
           }
           for (const log of entry.logs) {
-            state.deps.log[log.level](log.fields, log.message);
+            try {
+              state.deps.log[log.level](log.fields, log.message);
+            } catch (error) {
+              failures.push(error);
+            }
           }
         }
         if (failures.length > 1) {
