@@ -184,11 +184,27 @@ async function repairRecoveryProposals(
         if (outcome.outcomes.some((entry) => entry.result.kind === "repaired")) {
           noteCronJobsStoreCommit(input.storeKey);
         }
+        // The whole batch is committed and settled before publication, so a failing
+        // listener cannot skip later results; surface its failure afterwards.
+        const failures: unknown[] = [];
         for (const [index, entry] of outcome.outcomes.entries()) {
-          publish(proposals[index]!, entry.result);
+          try {
+            publish(proposals[index]!, entry.result);
+          } catch (error) {
+            failures.push(error);
+          }
           for (const log of entry.logs) {
             state.deps.log[log.level](log.fields, log.message);
           }
+        }
+        if (failures.length > 1) {
+          throw new AggregateError(
+            failures,
+            `failed to publish ${failures.length} cron recovery results`,
+          );
+        }
+        if (failures.length === 1) {
+          throw failures[0];
         }
       },
     });

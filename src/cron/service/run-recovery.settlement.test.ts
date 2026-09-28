@@ -21,7 +21,13 @@ import {
 import { prepareCronRunReceiptWriteSchema } from "../store/run-receipt-write-admission.js";
 import { stop } from "./ops-lifecycle.js";
 import { ensureLoadedForRead } from "./ops-shared.js";
-import { makeCronRecoveryState, observeCronTimerAdmissions } from "./run-recovery.test-support.js";
+import { recoverCronRunProposals } from "./run-recovery.js";
+import {
+  claimCronRecoveryReceipt,
+  makeCronRecoveryState,
+  observeCronRecoveryForTest,
+  observeCronTimerAdmissions,
+} from "./run-recovery.test-support.js";
 import { recomputeUnownedCronSchedules } from "./schedule-maintenance.js";
 import { createCronServiceState, type CronEvent } from "./state.js";
 import { onTimer } from "./timer.test-support.js";
@@ -184,4 +190,80 @@ it("rolls schedule maintenance back when process ownership changes before commit
     clearCronJobActive(job.id);
     stop(state);
   }
+});
+
+it("commits a recovery batch before publishing its first result", async () => {
+  const { storePath } = await makeStorePath();
+  const startedAtMs = Date.parse("2026-08-13T14:00:00.000Z");
+  const jobs = [
+    makeCronRecoveryJob("batch-first", startedAtMs),
+    makeCronRecoveryJob("batch-second", startedAtMs + 1),
+  ];
+  await writeCronStoreSnapshot({ storePath, jobs });
+  const receipts = jobs.map((job, index) =>
+    claimCronRecoveryReceipt(storePath, job, startedAtMs + index),
+  );
+  for (const receipt of receipts) {
+    releaseLocalCronRunReceiptOwnership(receipt);
+  }
+  const state = makeCronRecoveryState(logger, storePath, startedAtMs + 30_000);
+  const proposals = await Promise.all(
+    jobs.map((job, index) =>
+      observeCronRecoveryForTest(state, job.id, undefined, startedAtMs + index),
+    ),
+  );
+  const results: string[] = [];
+
+  await recoverCronRunProposals(state, proposals, {
+    mode: "startup",
+    onRecovery(proposal, result) {
+      results.push(`${proposal.jobId}:${result.kind}`);
+      // A published batch is already durable: a listener may inspect either job.
+      expect(inspectActiveCronRunReceipt({ storePath, jobId: jobs[1]!.id })).toBeUndefined();
+    },
+  });
+
+  expect(results).toEqual(["batch-first:repaired", "batch-second:repaired"]);
+  const persisted = await loadCronStore(storePath);
+  expect(persisted.jobs.map((job) => job.state.lastRunStatus)).toEqual(["error", "error"]);
+});
+
+it("publishes every committed batch result before surfacing a listener failure", async () => {
+  const { storePath } = await makeStorePath();
+  const startedAtMs = Date.parse("2026-08-13T14:00:00.000Z");
+  const jobs = [
+    makeCronRecoveryJob("batch-first", startedAtMs),
+    makeCronRecoveryJob("batch-second", startedAtMs + 1),
+  ];
+  await writeCronStoreSnapshot({ storePath, jobs });
+  const receipts = jobs.map((job, index) =>
+    claimCronRecoveryReceipt(storePath, job, startedAtMs + index),
+  );
+  for (const receipt of receipts) {
+    releaseLocalCronRunReceiptOwnership(receipt);
+  }
+  const state = makeCronRecoveryState(logger, storePath, startedAtMs + 30_000);
+  const proposals = await Promise.all(
+    jobs.map((job, index) =>
+      observeCronRecoveryForTest(state, job.id, undefined, startedAtMs + index),
+    ),
+  );
+  const results: string[] = [];
+  const failure = new Error("recovery listener failed");
+
+  await expect(
+    recoverCronRunProposals(state, proposals, {
+      mode: "startup",
+      onRecovery(proposal, result) {
+        results.push(`${proposal.jobId}:${result.kind}`);
+        if (results.length === 1) {
+          throw failure;
+        }
+      },
+    }),
+  ).rejects.toBe(failure);
+
+  expect(results).toEqual(["batch-first:repaired", "batch-second:repaired"]);
+  const persisted = await loadCronStore(storePath);
+  expect(persisted.jobs.map((job) => job.state.lastRunStatus)).toEqual(["error", "error"]);
 });
