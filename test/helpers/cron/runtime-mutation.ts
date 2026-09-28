@@ -46,7 +46,9 @@ export function loseFirstCronMutationReply(type: CronRuntimeMutationType = "cron
         typeof command.input.nonce === "string"
       ) {
         attempts.push(
-          Array.isArray(command.input.proposals) &&
+          // Repairs record their first job; other batch operations record their type.
+          command.type === "cron.repairRuns" &&
+            Array.isArray(command.input.proposals) &&
             isRecord(command.input.proposals[0]) &&
             typeof command.input.proposals[0].jobId === "string"
             ? command.input.proposals[0].jobId
