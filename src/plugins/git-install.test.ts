@@ -786,6 +786,17 @@ describe("installPluginFromGitSpec", () => {
         "failed to checkout v1 github.com/acme/demo: termination no-output-timeout (no output from git)",
     },
     {
+      failure: "silent ref lookup timeout",
+      spec: "git:https://github.com/acme/demo.git@v1",
+      results: [
+        { code: 0, stdout: "", stderr: "" },
+        { code: 124, stdout: "", stderr: "", signal: "SIGKILL", termination: "timeout" },
+        { code: 1, stdout: "", stderr: "" },
+      ],
+      error:
+        "failed to resolve ref v1 in github.com/acme/demo: termination timeout (no output from git)",
+    },
+    {
       failure: "silent commit lookup exit",
       spec: "git:https://github.com/acme/demo.git",
       results: [

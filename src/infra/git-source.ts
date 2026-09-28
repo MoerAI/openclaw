@@ -10,17 +10,23 @@ type GitSourceFailure = {
   stderr: string;
 } & Partial<Pick<SpawnResult, "code" | "signal" | "termination">>;
 
+/** Names a timeout or kill; undefined when Git exited on its own. */
+function describeGitStop(
+  result: Partial<Pick<SpawnResult, "signal" | "termination">>,
+): string | undefined {
+  if (result.termination === "timeout" || result.termination === "no-output-timeout") {
+    return `termination ${result.termination}`;
+  }
+  if (result.termination === "signal") {
+    return result.signal ? `signal ${result.signal}` : "termination signal";
+  }
+  return undefined;
+}
+
 /** Git always prints its "Cloning into" banner, so output alone cannot show a timeout or kill. */
 function describeGitFailure(failure: GitSourceFailure): string {
   const output = failure.stderr.trim() || failure.stdout.trim();
-  const stopped =
-    failure.termination === "timeout" || failure.termination === "no-output-timeout"
-      ? `termination ${failure.termination}`
-      : failure.termination === "signal"
-        ? failure.signal
-          ? `signal ${failure.signal}`
-          : "termination signal"
-        : undefined;
+  const stopped = describeGitStop(failure);
   if (stopped) {
     return output ? `${stopped}: ${output}` : `${stopped} (no output from git)`;
   }
@@ -68,7 +74,7 @@ export async function acquireGitSource(params: {
       ok: false as const,
       error:
         details.action === "resolve ref"
-          ? `failed to resolve ref ${ref} in ${label}`
+          ? `failed to resolve ref ${ref} in ${label}${describeGitStop(details) ? `: ${detail}` : ""}`
           : `failed to ${details.action}${details.action === "checkout" ? ` ${ref}` : ""} ${label}: ${detail}`,
     };
   };
@@ -101,6 +107,10 @@ export async function acquireGitSource(params: {
           ["git", "rev-parse", "--verify", "--quiet", `${candidate}^{commit}`],
           params.repoDir,
         );
+        // A stopped probe says nothing about whether the ref exists.
+        if (describeGitStop(resolved)) {
+          return await failure({ action: "resolve ref", ...resolved });
+        }
         const commit = normalizeOptionalString(resolved.stdout);
         if (resolved.code === 0 && commit) {
           commitish = commit;
