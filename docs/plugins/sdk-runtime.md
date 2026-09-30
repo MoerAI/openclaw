@@ -128,6 +128,14 @@ its managed handles. Already admitted calls and streams have a bounded chance
 to finish before disposal; retaining an old function does not make it a current
 runtime handle.
 
+Ordinary stream results project their payload on the first `value` read. Nested managed
+readers share data inspection within that synchronous read, while each reader
+keeps its own instance admission. An unread terminal payload does not need data
+inspection. Plain payloads retain their native identity and remain mutable;
+they are not frozen or transferred. Nested readers recheck later reads for
+mutations that need executable views. This does not give a closed
+consumer permission to read a retained active-stream result or call its methods.
+
 Context engines selected by an admitted turn remain owned through that turn's
 commit and engine disposal. Replacing an enabled plugin waits for those consumers
 to close before registering its successor. Disabling or removing a plugin can
@@ -210,6 +218,16 @@ without this hook, OpenClaw calls the existing `closeAllMemorySearchManagers`
 method, when provided, if the runtime or an embedding adapter retires. This closes
 all of that runtime's managers as best-effort cleanup; it cannot identify dependent
 managers or prevent concurrent manager acquisition.
+
+## Browser meeting status ownership
+
+`MeetingPlatformAdapter.createStatusCallSource` accepts an optional
+`liveOwnershipSource`: a JavaScript boolean expression evaluated in the generated
+status script's page scope. Use it when call ownership can change while device
+enumeration, speaker routing, or playback is awaiting completion. A false result
+stops that routing pass, restores matching sources through the session's audio
+cleanup helpers, retires owned bridges, and reports output as unrouted and
+retryable. Omitting the option leaves the generated status source unchanged.
 
 ## Browser meeting participation
 

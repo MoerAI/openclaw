@@ -5,7 +5,10 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
-import { sortUniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import {
+  normalizeSortedUniqueTrimmedStringList,
+  sortUniqueStrings,
+} from "@openclaw/normalization-core/string-normalization";
 import { resolveChannelDefaultAccountId } from "../channels/plugins/helpers.js";
 import { listReadOnlyChannelPluginsForConfig } from "../channels/plugins/read-only.js";
 import { getConfigResolutionFacts } from "../config/resolution-facts.js";
@@ -319,10 +322,8 @@ function addSelectedProviderCredentialTargets(params: {
   // Selected providers own one canonical plugin-scoped credential path.
   if (params.provider.credentialPath.trim()) {
     addConfigPathTargets({
+      ...params.state,
       path: params.provider.credentialPath,
-      targetIds: params.state.targetIds,
-      targetPaths: params.state.targetPaths,
-      allowedPaths: params.state.allowedPaths,
     });
   }
   if (hasConfiguredWebCredential(params.provider, params.config)) {
@@ -333,12 +334,8 @@ function addSelectedProviderCredentialTargets(params: {
     ?.path?.trim();
   if (fallbackPath) {
     addFallbackPathTargets({
+      ...params.state,
       path: fallbackPath,
-      targetIds: params.state.targetIds,
-      targetPaths: params.state.targetPaths,
-      allowedPaths: params.state.allowedPaths,
-      fallbackTargetIds: params.state.fallbackTargetIds,
-      fallbackPaths: params.state.fallbackPaths,
       addTargets: addConfigPathTargets,
     });
   }
@@ -375,12 +372,8 @@ function getCapabilityWebSelectedProviderTargetIds(
         : undefined;
     if (modelFallbackPath && !state.fallbackPaths.has(modelFallbackPath)) {
       addFallbackPathTargets({
+        ...state,
         path: modelFallbackPath,
-        targetIds: state.targetIds,
-        targetPaths: state.targetPaths,
-        allowedPaths: state.allowedPaths,
-        fallbackTargetIds: state.fallbackTargetIds,
-        fallbackPaths: state.fallbackPaths,
         addTargets: (targetParams) => addConfiguredConfigPathTargets({ config, ...targetParams }),
       });
     }
@@ -539,12 +532,7 @@ export function getScopedChannelsCommandSecretTargets(params: {
   const channels =
     params.channels === undefined
       ? undefined
-      : sortUniqueStrings(
-          params.channels.flatMap((candidate) => {
-            const normalized = normalizeOptionalString(candidate);
-            return normalized ? [normalized] : [];
-          }),
-        );
+      : normalizeSortedUniqueTrimmedStringList(params.channels);
   const targetIds =
     channels === undefined
       ? selectChannelTargetIds(channel)
@@ -666,11 +654,6 @@ export function getAgentRuntimeOptionalCommandSecretPaths(config: OpenClawConfig
   );
 }
 
-/** Static web-fetch capability targets plus plugin-provided web-fetch credential targets. */
-export function getCapabilityWebFetchCommandSecretTargetIds(): Set<string> {
-  return new Set(getCapabilityWebTargetIds("fetch"));
-}
-
 function getCapabilityWebCommandSecretTargets(
   config: OpenClawConfig,
   kind: WebCapability,
@@ -718,11 +701,6 @@ export function getCapabilityWebFetchCommandSecretTargets(
   },
 ): CommandSecretTargetScope {
   return getCapabilityWebCommandSecretTargets(config, "fetch", options?.providerId);
-}
-
-/** Static web-search capability targets plus plugin-provided web-search credential targets. */
-export function getCapabilityWebSearchCommandSecretTargetIds(): Set<string> {
-  return new Set(getCapabilityWebTargetIds("search"));
 }
 
 /** Web-search target scope for selected/auto-detected providers and configured fallback paths. */
