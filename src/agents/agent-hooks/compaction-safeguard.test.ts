@@ -941,80 +941,70 @@ describe("compaction-safeguard recent-turn preservation", () => {
     expect(JSON.stringify(mainCall.messages)).toContain("dropped history summary");
   });
 
-  it.each([
-    "model-output-limit",
-    "staged-summary-ceiling",
-    "copilot-headers",
-    "keyless-sdk-auth",
-  ] as const)("summarizes with provider-prepared model settings: %s", async (mode) => {
-    mockSummarizeInStages.mockResolvedValue("mock summary");
-    // Keep the model limit below the staged-summary ceiling so that row still
-    // proves the model-limit clamp rather than the safeguard's own ceiling.
-    const reserveCase =
-      mode === "model-output-limit"
-        ? { maxTokens: 4_000, reserve: 8_000, expected: 4_000 }
-        : mode === "staged-summary-ceiling"
-          ? { maxTokens: 128_000, reserve: 80_000, expected: 20_000 }
-          : undefined;
-    const model = createAnthropicModelFixture(
-      reserveCase
-        ? { contextWindow: 1_000_000, maxTokens: reserveCase.maxTokens }
-        : mode === "copilot-headers"
-          ? {
-              id: "gpt-5.4",
-              name: "gpt-5.4",
-              provider: "github-copilot",
-              api: "openai-responses",
-              baseUrl: "https://api.githubcopilot.com",
-            }
-          : { provider: "amazon-bedrock" },
-    );
-    const sessionManager = configuredSession({ model, recentTurnsPreserve: 0 });
-    const headers = {
-      "Copilot-Integration-Id": "copilot-developer-cli",
-      "Editor-Plugin-Version": "copilot-chat/0.35.0",
-      "Openai-Organization": "github-copilot",
-      "User-Agent": "GitHubCopilotChat/0.35.0",
-      "X-Test": "1",
-    };
-    const getApiKeyAndHeadersMock = vi.fn().mockResolvedValue(
-      mode === "keyless-sdk-auth"
-        ? { ok: true }
-        : {
-            ok: true,
-            apiKey: mode === "copilot-headers" ? "github-token" : "test-key",
-            ...(mode === "copilot-headers" ? { headers: { ...headers } } : {}),
-          },
-    );
-    const event = createCompactionEvent(
-      reserveCase
-        ? {
-            preparation: {
-              messagesToSummarize: [userMessage("large history", 1)],
-              tokensBefore: 250_000,
-              settings: { reserveTokens: reserveCase.reserve },
+  it.each(["cap-model-limit", "cap-staged-limit", "copilot-headers", "keyless-sdk-auth"] as const)(
+    "summarizes with provider-prepared model settings: %s",
+    async (mode) => {
+      mockSummarizeInStages.mockResolvedValue("mock summary");
+      const model = createAnthropicModelFixture(
+        mode.startsWith("cap-")
+          ? { contextWindow: 1_000_000, maxTokens: mode === "cap-model-limit" ? 4_000 : 128_000 }
+          : mode === "copilot-headers"
+            ? {
+                id: "gpt-5.4",
+                name: "gpt-5.4",
+                provider: "github-copilot",
+                api: "openai-responses",
+                baseUrl: "https://api.githubcopilot.com",
+              }
+            : { provider: "amazon-bedrock" },
+      );
+      const sessionManager = configuredSession({ model, recentTurnsPreserve: 0 });
+      const headers = {
+        "Copilot-Integration-Id": "copilot-developer-cli",
+        "Editor-Plugin-Version": "copilot-chat/0.35.0",
+        "Openai-Organization": "github-copilot",
+        "User-Agent": "GitHubCopilotChat/0.35.0",
+        "X-Test": "1",
+      };
+      const getApiKeyAndHeadersMock = vi.fn().mockResolvedValue(
+        mode === "keyless-sdk-auth"
+          ? { ok: true }
+          : {
+              ok: true,
+              apiKey: mode === "copilot-headers" ? "github-token" : "test-key",
+              ...(mode === "copilot-headers" ? { headers: { ...headers } } : {}),
             },
-          }
-        : { messageText: "summarize me", tokensBefore: 1000 },
-    );
-    const result = await createCompactionHandler()(
-      event,
-      createCompactionContext({ sessionManager, getApiKeyAndHeadersMock }),
-    );
-    expect(requireRecord(result).cancel).not.toBe(true);
-    const call = mockSummarizeInStages.mock.lastCall?.[0];
-    if (reserveCase) {
-      expect(call?.reserveTokens).toBe(reserveCase.expected);
-    } else if (mode === "copilot-headers") {
-      for (const [name, value] of Object.entries(headers)) {
-        expect(call?.headers?.[name]).toBe(value);
+      );
+      const event = createCompactionEvent(
+        mode.startsWith("cap-")
+          ? {
+              preparation: {
+                messagesToSummarize: [userMessage("large history", 1)],
+                tokensBefore: 250_000,
+                settings: { reserveTokens: mode === "cap-model-limit" ? 8_000 : 80_000 },
+              },
+            }
+          : { messageText: "summarize me", tokensBefore: 1000 },
+      );
+      const result = await createCompactionHandler()(
+        event,
+        createCompactionContext({ sessionManager, getApiKeyAndHeadersMock }),
+      );
+      expect(requireRecord(result).cancel).not.toBe(true);
+      const call = mockSummarizeInStages.mock.lastCall?.[0];
+      if (mode.startsWith("cap-")) {
+        expect(call?.reserveTokens).toBe(mode === "cap-model-limit" ? 4_000 : 20_000);
+      } else if (mode === "copilot-headers") {
+        for (const [name, value] of Object.entries(headers)) {
+          expect(call?.headers?.[name]).toBe(value);
+        }
+        expect(call?.headers?.["x-initiator"]).toBe("user");
+      } else {
+        expect(getApiKeyAndHeadersMock).toHaveBeenCalledWith(model);
+        expect(mockSummarizeInStages).toHaveBeenCalled();
       }
-      expect(call?.headers?.["x-initiator"]).toBe("user");
-    } else {
-      expect(getApiKeyAndHeadersMock).toHaveBeenCalledWith(model);
-      expect(mockSummarizeInStages).toHaveBeenCalled();
-    }
-  });
+    },
+  );
 
   it.each([false, true])(
     "sends one authoritative safeguard summary format (prefix=%s)",
