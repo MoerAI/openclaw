@@ -125,13 +125,7 @@ async function resolveNodeHostGatewayCredentials(params: {
   envOnly?: boolean;
 }): Promise<{ token?: string; password?: string }> {
   const env = params.env ?? process.env;
-  if (params.envOnly) {
-    return resolveExplicitGatewayAuth({
-      token: env.OPENCLAW_GATEWAY_TOKEN,
-      password: env.OPENCLAW_GATEWAY_PASSWORD,
-    });
-  }
-  if (await canReuseNodeHostDeviceToken(params)) {
+  if (params.envOnly || (await canReuseNodeHostDeviceToken(params))) {
     // A co-located Gateway's shared password must not displace the paired node
     // credential. GatewayClient rereads the current token when connecting.
     return resolveExplicitGatewayAuth({
@@ -189,6 +183,8 @@ export async function loadResumableNodeHostGateway(): Promise<NodeHostGatewayCon
 }
 
 export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
+  const { initializeSqliteRuntimeCapabilities } = await import("../infra/bun-sqlite-library.js");
+  await initializeSqliteRuntimeCapabilities();
   ensureNodeHostStateReady();
   const cfg = getRuntimeConfig();
   const savedConfig = await loadNodeHostConfig();
@@ -275,7 +271,6 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     config: cfg,
     env: process.env,
     enableAgentRuns: true,
-    enableWorkerRuns: true,
     forceWorkerRuns: opts.forceWorkerRuns,
     ephemeral: opts.ephemeral,
     installedAppsSharingEnabled: config.installedAppsSharing,
@@ -569,9 +564,11 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   }
 
   const readinessPromise = startGatewayClientWhenEventLoopReady(client);
-  let readiness;
   try {
-    readiness = await readinessPromise;
+    const readiness = await readinessPromise;
+    if (!readiness.ready) {
+      throw new Error("node host gateway event loop readiness timeout");
+    }
   } catch (error) {
     if (stopping) {
       await stopped;
@@ -580,15 +577,6 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     removeSignalHandlers();
     await stopClientAndMcp();
     throw error;
-  }
-  if (!readiness.ready) {
-    if (stopping) {
-      await stopped;
-      return;
-    }
-    removeSignalHandlers();
-    await stopClientAndMcp();
-    throw new Error("node host gateway event loop readiness timeout");
   }
   await stopped;
 }
