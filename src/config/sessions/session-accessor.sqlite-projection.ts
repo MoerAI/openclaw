@@ -3,10 +3,6 @@ import { isDeepStrictEqual } from "node:util";
 import { isMainThread } from "node:worker_threads";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { resolveStoredSessionOwnerAgentId } from "../../gateway/session-store-key.js";
-import {
-  resolveAgentHarnessSessionStoreError,
-  resolveAgentHarnessSessionStoreTransitionError,
-} from "../../sessions/agent-harness-session-key.js";
 import { readOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db-identity.js";
 import {
   deferOpenClawAgentPostCommitPublication,
@@ -29,19 +25,16 @@ import type {
   SessionEntryLifecycleMutationResult,
 } from "./session-accessor.sqlite-contract.js";
 import {
+  captureNativeSessionWorkerDeletion,
   hasPreparedNativeSessionDeletion,
   runPreparedSqliteSessionWrite,
   runSqliteSessionDeletionTransaction as runOpenClawAgentWriteTransaction,
   withSqliteSessionDeletions,
 } from "./session-accessor.sqlite-deletion.js";
 import { assertSessionSubagentRunsCurrent } from "./session-accessor.sqlite-descendant-basis.js";
-import { sqliteSessionEntriesEqual } from "./session-accessor.sqlite-entry-equality.js";
 import {
-  deleteSessionEntryRows,
-  readExactSessionEntryRow,
   readSessionEntryCount,
   readSessionEntryStore,
-  writeSessionEntry,
 } from "./session-accessor.sqlite-entry-store.js";
 import { emitArchivedTranscriptUpdates } from "./session-accessor.sqlite-events.js";
 import {
@@ -81,6 +74,10 @@ import {
   toDatabaseOptions,
   withSqliteSessionDatabase,
 } from "./session-accessor.sqlite-scope.js";
+import {
+  commitSessionLifecycleProjectionInWorker,
+  projectSessionEntryLifecycleMutationInWorker,
+} from "./session-lifecycle-projection.js";
 import { prepareSessionMaintenancePreservation } from "./store-maintenance-preserve.js";
 import { resolveMaintenanceConfig } from "./store-maintenance-runtime.js";
 import { normalizeResolvedMaintenanceConfigInput } from "./store-maintenance.js";
@@ -88,150 +85,24 @@ import type { SessionEntry } from "./types.js";
 
 export { applySessionEntryExactReplacements as applySessionEntryReplacements } from "./session-accessor.sqlite-replacement-projection.js";
 
-type SessionArchiveRuntime = typeof import("../../gateway/session-archive.runtime.js");
-let sessionArchiveRuntimePromise: Promise<SessionArchiveRuntime> | undefined;
-
-function loadSessionArchiveRuntime() {
-  sessionArchiveRuntimePromise ??= import("../../gateway/session-archive.runtime.js");
-  return sessionArchiveRuntimePromise;
-}
-
-/**
- * Applies a detached whole-store projection under the SQLite writer lane.
- * This exists only for bounded compatibility adapters that must preserve a
- * legacy serialized callback without exposing mutable storage internals.
- */
-export async function applySessionStoreProjection<T>(params: {
-  activeSessionKey?: string;
-  agentId?: string;
-  skipMaintenance?: boolean;
-  storePath: string;
-  update: (store: Record<string, SessionEntry>) =>
-    | Promise<{ persist: boolean; result: T }>
-    | {
-        persist: boolean;
-        result: T;
-      };
-}): Promise<T> {
-  const resolved = resolveSqliteScope({
-    ...(params.agentId ? { agentId: params.agentId } : {}),
-    sessionKey: params.activeSessionKey ?? "",
-    storePath: params.storePath,
-  });
-  const preparedWrite = await runPreparedSqliteSessionWrite(
-    resolved,
-    async () => {
-      return withSqliteSessionDatabase(toDatabaseOptions(resolved), async (database) => {
-        const before = readSessionEntryStore(database);
-        const projected = structuredClone(before);
-        const operation = await params.update(projected);
-        if (!operation.persist) {
-          return {
-            deletedEntries: [],
-            commit: () => ({ maintenancePlans: [], result: operation.result }),
-          };
-        }
-        const lockedEntriesBefore = new Map(
-          Object.entries(before).filter(([, entry]) => entry.modelSelectionLocked === true),
-        );
-        const transitionError = resolveAgentHarnessSessionStoreTransitionError({
-          before: lockedEntriesBefore,
-          store: projected,
-        });
-        const storeError = resolveAgentHarnessSessionStoreError(projected);
-        if (transitionError || storeError) {
-          throw new Error(transitionError ?? storeError);
-        }
-
-        const changedKeys = uniqueStrings([
-          ...Object.keys(before),
-          ...Object.keys(projected),
-        ]).filter(
-          (sessionKey) => !sqliteSessionEntriesEqual(before[sessionKey], projected[sessionKey]),
-        );
-        if (changedKeys.length === 0) {
-          return {
-            deletedEntries: [],
-            commit: () => ({ maintenancePlans: [], result: operation.result }),
-          };
-        }
-
-        const maintenancePlans: SessionEntryMaintenancePlan[] = [];
-        const deletedOwners = changedKeys.flatMap((sessionKey) => {
-          const entry = before[sessionKey];
-          return entry && !projected[sessionKey] ? [{ entry, sessionKey }] : [];
-        });
-        return {
-          deletedEntries: deletedOwners,
-          commit: (assertSourceCurrent) =>
-            withSqliteSessionDatabase(toDatabaseOptions(resolved), () => {
-              runOpenClawAgentWriteTransaction(
-                (transactionDb) => {
-                  assertSourceCurrent?.();
-                  for (const sessionKey of changedKeys) {
-                    const current = readExactSessionEntryRow(transactionDb, sessionKey)?.entry;
-                    if (!sqliteSessionEntriesEqual(current, before[sessionKey])) {
-                      throw new Error(
-                        `SQLite session entry changed before store projection for ${sessionKey}`,
-                      );
-                    }
-                  }
-                  for (const sessionKey of changedKeys) {
-                    const entry = projected[sessionKey];
-                    if (entry) {
-                      writeSessionEntry(transactionDb, sessionKey, structuredClone(entry), {
-                        previousEntry: before[sessionKey] ?? null,
-                      });
-                    } else {
-                      deleteSessionEntryRows(transactionDb, sessionKey);
-                    }
-                  }
-                  maintenancePlans.push(
-                    applySessionEntryMaintenance(transactionDb, {
-                      activeSessionKey: params.activeSessionKey ?? "",
-                      archiveDirectory: resolveSqliteTranscriptArchiveDirectory(resolved),
-                      skipMaintenance: params.skipMaintenance,
-                      storePath: params.storePath,
-                    }),
-                  );
-                },
-                toDatabaseOptions(resolved),
-                { operationLabel: "session.store-projection" },
-              );
-              return { maintenancePlans, result: operation.result };
-            }),
-        };
-      });
-    },
-    "session.store-projection",
-  );
-  const committed = preparedWrite.result;
-  await finalizeSessionEntryMaintenancePlansAfterWriterReleaseBestEffort(
-    resolved,
-    committed.maintenancePlans,
-    { deletedEntriesBeforeMaintenance: preparedWrite.deletedEntries },
-  );
-  return committed.result;
-}
-
 /** Applies exact lifecycle removals/upserts using SQLite session rows. */
 export async function applySessionEntryLifecycleMutation(
   params: SessionEntryLifecycleMutationParams,
-): Promise<SessionEntryLifecycleMutationResult> {
-  const resolved = captureLifecycleDatabaseScope(
+  resolved = captureLifecycleDatabaseScope(
     resolveSqliteScope({
       ...(params.agentId ? { agentId: params.agentId } : {}),
       env: params.env,
       sessionKey: "",
       storePath: params.storePath,
     }),
-  );
+  ),
+): Promise<SessionEntryLifecycleMutationResult> {
   const removals = [...(params.removals ?? [])];
   const upserts = [...(params.upserts ?? [])];
   const databaseOptions = toDatabaseOptions(resolved);
   const useWorker =
     isMainThread &&
-    upserts.length === 0 &&
+    !params.allowCanonicalRepair &&
     !params.afterUpsertsInTransaction &&
     !params.afterFreshUpsertsInTransaction &&
     !params.beforeCommitInTransaction &&
@@ -269,20 +140,14 @@ export async function applySessionEntryLifecycleMutation(
             () => execution?.assertCurrent(),
             execution,
           );
-          const result = await runSqliteSessionReclamation({
-            forceInProcess: false,
-            assertCommitAllowed: () => execution?.assertCurrent(),
-            plan: {
-              kind: "lifecycle-projection-plan",
-              databaseOptions: reclamationOptions,
-              materializedPlans: [],
-              input: projectionInput,
-            },
+        }
+        if (reclamationOptions && execution) {
+          projected = await projectSessionEntryLifecycleMutationInWorker({
+            database: reclamationOptions,
+            execution,
+            input: projectionInput,
+            upserts,
           });
-          if (result.kind !== "lifecycle-projection-plan") {
-            throw new Error("SQLite lifecycle projection returned an unexpected planning result");
-          }
-          projected = result.value;
         } else {
           projected = await projectSessionEntryLifecycleMutation(databaseOptions, {
             ...projectionInput,
@@ -328,7 +193,11 @@ export async function applySessionEntryLifecycleMutation(
               }
             : {}),
           commit: async (assertSourceCurrent?: () => void) => {
-            if (reclamationOptions && !hasPreparedNativeSessionDeletion()) {
+            if (
+              reclamationOptions &&
+              (!hasPreparedNativeSessionDeletion() ||
+                captureNativeSessionWorkerDeletion(deletedOwners))
+            ) {
               const preparedPreservation = params.skipMaintenance
                 ? undefined
                 : await prepareSessionMaintenancePreservation(params.storePath);
@@ -350,6 +219,8 @@ export async function applySessionEntryLifecycleMutation(
                   execution?.assertCurrent();
                   params.commitGuard?.();
                   assertSourceCurrent?.();
+                };
+                const assertPreservationCurrent = () => {
                   if (
                     maintenance &&
                     preparedPreservation &&
@@ -360,9 +231,33 @@ export async function applySessionEntryLifecycleMutation(
                     );
                   }
                 };
+                if (upserts.length > 0 && execution && !hasPreparedNativeSessionDeletion()) {
+                  return withArchivePublication(
+                    await commitSessionLifecycleProjectionInWorker({
+                      database: reclamationOptions,
+                      execution,
+                      assertCurrent,
+                      assertPreservationCurrent,
+                      onLifecycleCommitted: params.onLifecycleCommitted,
+                      input: {
+                        agentId: resolved.agentId,
+                        projected,
+                        removalPlans: materializedRemovalPlans,
+                        materializationFailed: removalArchiveMaterializationFailed,
+                        allowCanonicalRepair: params.allowCanonicalRepair,
+                        maintenance,
+                        descendantRunBasis: params.descendantRunBasis,
+                        maintenanceRunBasis: preparedPreservation?.subagentRunBasis,
+                      },
+                    }),
+                  );
+                }
                 const result = await runSqliteSessionReclamation({
                   forceInProcess: false,
-                  assertCommitAllowed: assertCurrent,
+                  assertCommitAllowed: () => {
+                    assertCurrent();
+                    assertPreservationCurrent();
+                  },
                   onWorkerResult: (completed) => {
                     if (completed.kind === "lifecycle-projection-commit") {
                       params.onLifecycleCommitted?.();
@@ -415,7 +310,7 @@ export async function applySessionEntryLifecycleMutation(
       "session.lifecycle.mutate",
       params.withCommit,
       undefined,
-      useWorker ? "worker" : "foreground",
+      useWorker && upserts.length === 0 ? "worker" : "foreground",
     );
     const committed = preparedWrite.result;
 
@@ -535,7 +430,8 @@ export async function applySessionEntryLifecycleMutation(
     ).toSorted();
     if (archivedTranscriptDirectories.length > 0 && params.cleanupArchivedTranscripts) {
       try {
-        const { cleanupArchivedSessionTranscripts } = await loadSessionArchiveRuntime();
+        const { cleanupArchivedSessionTranscripts } =
+          await import("../../gateway/session-archive.runtime.js");
         await cleanupArchivedSessionTranscripts({
           directories: archivedTranscriptDirectories,
           rules: params.cleanupArchivedTranscripts.rules,

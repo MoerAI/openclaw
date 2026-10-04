@@ -1,12 +1,16 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi, type Mock } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
+import type { ChatAbortControllerEntry } from "../../../gateway/chat-abort.types.js";
 import type { GatewayRecoveryRuntime } from "../../../gateway/server-instance-runtime.types.js";
+import type { deleteGatewaySession } from "../../../gateway/server-methods/sessions-delete.js";
 import {
+  bindGatewayContextResolver,
   getGatewayContextResolver,
   getSharedGatewayContextResolver,
 } from "../../../plugins/runtime/gateway-request-scope.js";
 import { getActiveGatewayRootWorkCount } from "../../../process/gateway-work-admission.js";
+import { trackAsyncWork } from "../../../shared/async-work-scope.js";
 import {
   createSessionEntry,
   createSubagentRunRecord,
@@ -20,6 +24,25 @@ import { observeRootWork } from "./subagent-registry.browser-cleanup.test-suppor
 import type { createSubagentRegistryMockState } from "./subagent-registry.mock-state.test-support.js";
 import { makeQueuedRun } from "./subagent-registry.run-fixtures.test-support.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { isSameSubagentRun } from "./subagent-run-generation.js";
+
+vi.mock("../../../gateway/server-methods/sessions-delete.js", () => ({
+  deleteGatewaySession: async ({
+    params,
+    context,
+    assertCurrent,
+  }: Parameters<typeof deleteGatewaySession>[0]): ReturnType<typeof deleteGatewaySession> => {
+    // Both deletion entry points share this host fixture's controlled completion.
+    assertCurrent?.();
+    await expectDefined(context.recoveryRuntime, "fixture lifecycle runtime").dispatchSessionMethod(
+      "sessions.delete",
+      params,
+      { assertCurrent },
+    );
+    assertCurrent?.();
+    return { ok: true, result: { ok: true, key: params.key, deleted: true, archived: [] } };
+  },
+}));
 
 type RestoredSettlementTestOptions = {
   getRegistry: () => SubagentRegistryHarness;
@@ -31,8 +54,22 @@ type RestoredSettlementTestOptions = {
     | "runSubagentAnnounceFlow"
     | "dispatchRecoveryAgent"
   >;
-  hydrateAndActivateRegistry: () => void;
+  hydrateAndActivateRegistry: () => Promise<void>;
 };
+
+export async function activateSubagentRegistryWithRecoveryRuntime(
+  mod: SubagentRegistryHarness,
+  recoveryRuntime: GatewayRecoveryRuntime,
+): Promise<void> {
+  const gatewayContext = {
+    chatAbortControllers: new Map<string, ChatAbortControllerEntry>(),
+    recoveryRuntime,
+    trackExecution: trackAsyncWork,
+    resolveGatewayContext: () => gatewayContext as never,
+  };
+  bindGatewayContextResolver(recoveryRuntime, gatewayContext.resolveGatewayContext);
+  await mod.activateSubagentRegistry(gatewayContext.resolveGatewayContext);
+}
 
 export function registerRestoredRunningSettlementTest({
   getRegistry,
@@ -74,13 +111,13 @@ export function registerRestoredRunningSettlementTest({
           createdAt: startedAt,
           execution: { status: "running", startedAt, lifecycleGeneration: "retired-generation" },
         });
-        mocks.restoreSubagentRunsFromDisk.mockImplementation((params) => {
+        mocks.restoreSubagentRunsFromDisk.mockImplementation(async (params) => {
           params.runs.set(runId, restored);
           return 1;
         });
         mockGatewayMethods(mocks.callGateway, { "agent.wait": { status: "timeout" } });
 
-        hydrateAndActivateRegistry();
+        await hydrateAndActivateRegistry();
 
         await announceEntered.promise;
         await settleRootWork(true);
@@ -111,9 +148,9 @@ export function registerRestoredRollbackPublicationTest({
 }: {
   mocks: Pick<
     ReturnType<typeof createSubagentRegistryMockState>,
-    "entries" | "persistSubagentRunsToDiskOrThrow" | "callGateway" | "emitSessionLifecycleEvent"
+    "entries" | "persistRegistryRows" | "callGateway" | "emitSessionLifecycleEvent"
   >;
-  hydrateAndActivateRegistry: () => void;
+  hydrateAndActivateRegistry: () => Promise<void>;
   mockSingleCollectorConcurrency: () => void;
   mockRestoredRuns: (createEntries: () => SubagentRunRecord[]) => void;
 }): void {
@@ -137,9 +174,6 @@ export function registerRestoredRollbackPublicationTest({
       },
       "agent:main:subagent:run-restored-stop-two": { sessionId: "two", updatedAt: now },
     };
-    mocks.persistSubagentRunsToDiskOrThrow.mockImplementationOnce(() => {
-      throw new Error("sqlite unavailable after Gateway acceptance");
-    });
     let agentCalls = 0;
     const dispatchedSessionKeys: unknown[] = [];
     const launchEntered = createDeferred();
@@ -170,22 +204,26 @@ export function registerRestoredRollbackPublicationTest({
       return request.method === "agent.wait" ? { status: "pending" } : {};
     });
 
-    hydrateAndActivateRegistry();
+    await hydrateAndActivateRegistry();
     await launchEntered.promise;
+    mocks.persistRegistryRows.mockImplementationOnce(() => {
+      throw new Error("sqlite unavailable after Gateway acceptance");
+    });
     const memory = await import("./subagent-registry-memory.js");
     const entry = expectDefined(memory.subagentRuns.get("run-restored-stop-one"), "restored run");
-    const publication = memory.subagentRuns.captureRetirement(
-      entry,
-      (current) => current === entry,
+    const publication = memory.subagentRuns.captureRetirement(entry, (current) =>
+      isSameSubagentRun(current, entry),
     );
-    const overlap = memory.subagentRuns.captureRetirement(entry, (current) => current === entry);
+    const overlap = memory.subagentRuns.captureRetirement(entry, (current) =>
+      isSameSubagentRun(current, entry),
+    );
     const cleanupWaiting = createDeferred();
     const waitForPublication = memory.waitForSubagentRetirementPublication;
     const publicationWait = vi
       .spyOn(memory, "waitForSubagentRetirementPublication")
       .mockImplementation((current) => {
         const pending = waitForPublication(current);
-        if (current === entry && pending) {
+        if (isSameSubagentRun(current, entry) && pending) {
           cleanupWaiting.resolve();
         }
         return pending;
@@ -256,11 +294,11 @@ export function registerRestoredRequesterWakeSettlementTests({
   getRegistry: () => SubagentRegistryHarness;
   mocks: Pick<
     ReturnType<typeof createSubagentRegistryMockState>,
-    "restoreSubagentRunsFromDisk" | "persistSubagentRunsToDiskOrThrow" | "runSubagentAnnounceFlow"
+    "restoreSubagentRunsFromDisk" | "persistRegistryRows" | "runSubagentAnnounceFlow"
   >;
   wakeRequester: Mock<typeof maybeWakeRequesterAfterAllChildrenSettled>;
   bindWakeMutation: (entries: readonly SubagentRunRecord[]) => void;
-  activateRegistry: () => void;
+  activateRegistry: () => Promise<void>;
   recoveryRuntime: GatewayRecoveryRuntime;
 }): void {
   it.each([
@@ -280,6 +318,7 @@ export function registerRestoredRequesterWakeSettlementTests({
       createSubagentRunRecord({
         runId,
         childSessionKey: `agent:main:subagent:${runId}`,
+        requesterAgentId: "main",
         task: "restore requester settle wake",
         cleanup: "delete",
         expectsCompletionMessage: true,
@@ -298,7 +337,7 @@ export function registerRestoredRequesterWakeSettlementTests({
         },
       }),
     );
-    mocks.restoreSubagentRunsFromDisk.mockImplementation(((params: {
+    mocks.restoreSubagentRunsFromDisk.mockImplementation((async (params: {
       runs: Map<string, SubagentRunRecord>;
     }) => {
       let inserted = 0;
@@ -311,7 +350,7 @@ export function registerRestoredRequesterWakeSettlementTests({
       return inserted;
     }) as never);
     if (lateRestore) {
-      mocks.restoreSubagentRunsFromDisk.mockImplementationOnce(((params: {
+      mocks.restoreSubagentRunsFromDisk.mockImplementationOnce((async (params: {
         runs: Map<string, SubagentRunRecord>;
       }) => {
         if (restoreTiming === "partial restore") {
@@ -321,34 +360,46 @@ export function registerRestoredRequesterWakeSettlementTests({
       }) as never);
     }
     const retirementWrites: string[][] = [];
-    mocks.persistSubagentRunsToDiskOrThrow.mockImplementation((runs, ids) => {
-      if (ids?.some((id) => runIds.includes(id)) && runIds.every((id) => !runs.has(id))) {
+    mocks.persistRegistryRows.mockImplementation((runs, ids) => {
+      if (runIds.every((id) => ids.includes(id) && !runs.has(id))) {
         retirementWrites.push(ids.toSorted());
       }
     });
     const wakeGateway = createDeferred<unknown>();
+    const wakeOutcome = wakeGateway.promise.then(
+      (gateway) => ({ gateway }),
+      (error: unknown) => ({ error }),
+    );
     wakeRequester.mockImplementation(async (params) => {
-      const gateway = getSharedGatewayContextResolver(restored)?.()?.recoveryRuntime;
-      bindWakeMutation(restored);
-      await params.completeBatch(restored);
-      wakeGateway.resolve(gateway);
-      return false;
+      try {
+        const gateway = getSharedGatewayContextResolver(restored)?.()?.recoveryRuntime;
+        bindWakeMutation(restored);
+        await params.completeBatch(restored);
+        wakeGateway.resolve(gateway);
+        return false;
+      } catch (error) {
+        wakeGateway.reject(error);
+        throw error;
+      }
     });
     let gatewayOpen = true;
-    const instanceContext = { recoveryRuntime } as never;
+    const instanceContext = {
+      chatAbortControllers: new Map<string, ChatAbortControllerEntry>(),
+      recoveryRuntime,
+    } as never;
     const resolveInstance = () => (gatewayOpen ? instanceContext : undefined);
     const resolveGatewayContext = () =>
       (restoreTiming === "without instance binding"
-        ? { recoveryRuntime }
+        ? instanceContext
         : { resolveGatewayContext: resolveInstance }) as never;
     const settleRootWork = observeRootWork();
     try {
-      mod.initSubagentRegistry();
+      await mod.initSubagentRegistry();
       if (restoreTiming === "without activation") {
         mod.resumeSubagentRun(restored[0]!.runId);
       } else {
-        mod.activateSubagentRegistry(resolveGatewayContext);
-        mod.activateSubagentRegistry(resolveGatewayContext);
+        await mod.activateSubagentRegistry(resolveGatewayContext);
+        await mod.activateSubagentRegistry(resolveGatewayContext);
       }
       if (lateRestore) {
         expect(wakeRequester).not.toHaveBeenCalled();
@@ -363,10 +414,14 @@ export function registerRestoredRequesterWakeSettlementTests({
           expect(wakeRequester).not.toHaveBeenCalled();
           expect(getGatewayContextResolver(restored[0]!)).toBeUndefined();
           expect(restored[0]!.requesterSettleWake?.attemptCount).toBe(1);
-          activateRegistry();
+          await activateRegistry();
         }
       }
-      expect(await wakeGateway.promise).toBe(
+      const outcome = await wakeOutcome;
+      if ("error" in outcome) {
+        throw outcome.error;
+      }
+      expect(outcome.gateway).toBe(
         restoreTiming === "without activation" ? undefined : recoveryRuntime,
       );
     } finally {
@@ -387,5 +442,94 @@ export function registerRestoredRequesterWakeSettlementTests({
         completeBatch: expect.any(Function),
       }),
     );
+  });
+}
+
+export function registerRestoredRotationFailureTest({
+  getRegistry,
+  mocks,
+  hydrateAndActivateRegistry,
+  mockSingleCollectorConcurrency,
+  mockRestoredRuns,
+}: {
+  getRegistry: () => SubagentRegistryHarness;
+  mocks: Pick<
+    ReturnType<typeof createSubagentRegistryMockState>,
+    "entries" | "persistRegistryRows" | "callGateway" | "lifecycleGeneration"
+  >;
+  hydrateAndActivateRegistry: () => Promise<void>;
+  mockSingleCollectorConcurrency: () => void;
+  mockRestoredRuns: (createEntries: () => SubagentRunRecord[]) => void;
+}): void {
+  it("releases restored FIFO ownership when lifecycle rotates during failure persistence", async () => {
+    const mod = getRegistry();
+    vi.useRealTimers();
+    const now = Date.now();
+    mockSingleCollectorConcurrency();
+    mockRestoredRuns(() => [
+      makeQueuedRun({
+        runId: "run-restored-rotation-one",
+        groupId: "restore-lifecycle-rotation",
+        createdAt: now,
+      }),
+      makeQueuedRun({
+        runId: "run-restored-rotation-two",
+        groupId: "restore-lifecycle-rotation",
+        createdAt: now + 1,
+      }),
+    ]);
+    mocks.entries = {
+      "agent:main:subagent:run-restored-rotation-one": {
+        sessionId: "one",
+        lifecycleRevision: "revision-one",
+        updatedAt: now,
+      },
+      "agent:main:subagent:run-restored-rotation-two": {
+        sessionId: "two",
+        lifecycleRevision: "revision-two",
+        updatedAt: now,
+      },
+    };
+    let persistenceCalls = 0;
+    let concurrentSweep: Promise<void> | undefined;
+    let agentCalls = 0;
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        agentCalls += 1;
+        if (agentCalls === 1) {
+          mocks.persistRegistryRows.mockImplementation(() => {
+            persistenceCalls += 1;
+            if (persistenceCalls === 1) {
+              throw new Error("sqlite unavailable after Gateway acceptance");
+            }
+            if (persistenceCalls === 2) {
+              mocks.lifecycleGeneration = "rotated-generation";
+              concurrentSweep = mod.testing.sweepOnceForTests();
+              throw new Error("sqlite unavailable during failure settlement");
+            }
+          });
+        }
+        return { runId: `gateway-restored-rotation-${agentCalls}` };
+      }
+      return request.method === "agent.wait" ? { status: "pending" } : {};
+    });
+
+    await hydrateAndActivateRegistry();
+
+    await waitForFast(() => expect(persistenceCalls).toBeGreaterThanOrEqual(3));
+    await concurrentSweep;
+    await waitForFast(() => expect(agentCalls).toBe(2));
+    await waitForFast(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
+    expect(mod.getSubagentRunByRunId("run-restored-rotation-one")).toMatchObject({
+      execution: {
+        status: "terminal",
+        suppressSessionEffects: true,
+        outcome: { status: "error" },
+      },
+      collectorCompletion: { status: "failed" },
+    });
+    expect(mod.getSubagentRunByRunId("gateway-restored-rotation-2")).toMatchObject({
+      execution: { status: "running", lifecycleGeneration: "rotated-generation" },
+    });
   });
 }
