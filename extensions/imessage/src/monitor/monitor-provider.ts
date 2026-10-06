@@ -57,7 +57,7 @@ import {
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import {
   getSessionEntry,
-  readSessionUpdatedAt,
+  readSessionUpdatedAtAsync,
   resolveSendPolicy,
   resolveStorePath,
 } from "openclaw/plugin-sdk/session-store-runtime";
@@ -226,8 +226,8 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts): Promis
   const selfChatCache = createSelfChatCache();
   const loopRateLimiter = createLoopRateLimiter();
   const textLimit = resolveTextChunkLimit(cfg, "imessage", accountInfo.accountId);
-  const allowFrom = normalizeStringEntries(opts.allowFrom ?? imessageCfg.allowFrom);
-  const configuredGroupAllowFrom = opts.groupAllowFrom ?? imessageCfg.groupAllowFrom;
+  const allowFrom = normalizeStringEntries(imessageCfg.allowFrom);
+  const configuredGroupAllowFrom = imessageCfg.groupAllowFrom;
   const groupAllowFrom = normalizeStringEntries(
     configuredGroupAllowFrom ??
       (imessageCfg.allowFrom && imessageCfg.allowFrom.length > 0 ? imessageCfg.allowFrom : []),
@@ -260,10 +260,10 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts): Promis
   });
   const dmPolicy = imessageCfg.dmPolicy ?? "pairing";
   const catchupCfg = resolveCatchupConfig(imessageCfg.catchup);
-  const includeAttachments = opts.includeAttachments ?? imessageCfg.includeAttachments ?? false;
-  const mediaMaxBytes = (opts.mediaMaxMb ?? imessageCfg.mediaMaxMb ?? 16) * 1024 * 1024;
-  const cliPath = opts.cliPath ?? imessageCfg.cliPath ?? "imsg";
-  const dbPath = opts.dbPath ?? imessageCfg.dbPath;
+  const includeAttachments = imessageCfg.includeAttachments ?? false;
+  const mediaMaxBytes = (imessageCfg.mediaMaxMb ?? 16) * 1024 * 1024;
+  const cliPath = imessageCfg.cliPath ?? "imsg";
+  const dbPath = imessageCfg.dbPath;
   const probeTimeoutMs = imessageCfg.probeTimeoutMs ?? DEFAULT_IMESSAGE_PROBE_TIMEOUT_MS;
   const attachmentRoots = resolveIMessageAttachmentRoots({
     cfg,
@@ -838,7 +838,7 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts): Promis
             }),
           }
         : decision;
-    const previousTimestamp = readSessionUpdatedAt({
+    const previousTimestamp = await readSessionUpdatedAtAsync({
       storePath,
       sessionKey: decision.route.sessionKey,
     });

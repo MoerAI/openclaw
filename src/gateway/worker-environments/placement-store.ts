@@ -29,6 +29,7 @@ import type { PlacementStoreRuntime } from "./placement-runtime.js";
 import { createPlacementSessionToolOperationOps } from "./placement-session-tool-operations.js";
 import {
   observePlacementAuthority,
+  preparePlacementAuthorityRead,
   preparePlacementTurnClaimAuthority,
   publishPlacementTurnClaimCleared,
   type PlacementTurnClaimAuthority,
@@ -138,20 +139,17 @@ export function createWorkerSessionPlacementStore(
 
     async prepareRuntimeRefresh(sessionIdInput: string) {
       const sessionId = required(sessionIdInput, "session id");
-      const observation = observePlacementAuthority(path, sessionId);
-      try {
-        const projection = await store.readProjection([sessionId], { current: true });
-        observation.assertCurrent();
-        return {
-          placement: projection.placements.get(sessionId),
-          move: projection.moves.get(sessionId),
-          pendingResult: projection.pendingResults.get(sessionId),
-          ...observation,
-        };
-      } catch (error) {
-        observation.release();
-        throw error;
-      }
+      const { value: projection, ...observation } = await preparePlacementAuthorityRead(
+        path,
+        sessionId,
+        () => store.readProjection([sessionId], { current: true }),
+      );
+      return {
+        placement: projection.placements.get(sessionId),
+        move: projection.moves.get(sessionId),
+        pendingResult: projection.pendingResults.get(sessionId),
+        ...observation,
+      };
     },
 
     async prepareMaintenancePlacements() {
@@ -242,6 +240,21 @@ export function createWorkerSessionPlacementStore(
           projection.workspaceRecoveryPendingSessionIds,
         ),
       };
+    },
+
+    async readEnvironmentOwner(environmentId: string) {
+      const result = await executeExistingOpenClawStateRead(
+        { path },
+        {
+          type: "workers.placementEnvironmentOwner",
+          environmentId: required(environmentId, "environment id"),
+        },
+        { current: true },
+      );
+      if (!result || !result.ok || result.type !== "workers.placementEnvironmentOwner") {
+        throw new Error("Worker placement environment owner source is unavailable");
+      }
+      return result.placement;
     },
 
     async readRecoveryCandidates() {
