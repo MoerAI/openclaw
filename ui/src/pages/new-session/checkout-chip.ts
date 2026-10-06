@@ -94,12 +94,11 @@ function handleBranchKeydown(target: HTMLElement, event: KeyboardEvent): boolean
 export function resolveCheckoutChip(params: {
   destination: "local" | "remote" | "cloud";
   worktree: boolean;
-  worktreeAvailable: boolean;
   worktreeName: string;
   headBranch?: string;
   baseRef: string;
   repository?: boolean;
-}): CheckoutChipState | null {
+}): CheckoutChipState {
   const worktreeName = params.worktreeName.trim();
   if (params.worktree && !params.repository && worktreeName) {
     return { label: t("newSession.checkoutWorktreeNamed", { name: worktreeName }) };
@@ -118,9 +117,6 @@ export function resolveCheckoutChip(params: {
         : t("newSession.checkoutRepository"),
     };
   }
-  if (params.destination === "local" && !params.worktreeAvailable && !params.worktree) {
-    return null;
-  }
   if (!params.worktree) {
     return { label: params.headBranch || t("newSession.checkoutCurrent") };
   }
@@ -132,7 +128,6 @@ export function resolveCheckoutChip(params: {
 }
 
 function renderWorktreeFields(params: {
-  idPrefix?: string;
   branches: DraftBranches | null;
   branchesLoading: boolean;
   baseRef: string;
@@ -188,12 +183,12 @@ function renderWorktreeFields(params: {
   const suggestions = (params.branches?.branches ?? []).slice(0, 8);
   const branchName = params.worktreeName.trim();
   const baseRefInput = html`<input
-    id=${(params.idPrefix ?? "new-session") + "-worktree-base-ref"}
+    id="new-session-worktree-base-ref"
     type="text"
     role=${suggestions.length ? "combobox" : nothing}
     aria-label=${t("newSession.worktreeBaseRef")}
     aria-autocomplete=${suggestions.length ? "list" : nothing}
-    aria-controls=${suggestions.length ? (params.idPrefix ?? "new-session") + "-worktree-branch-suggestions" : nothing}
+    aria-controls=${suggestions.length ? "new-session-worktree-branch-suggestions" : nothing}
     aria-expanded=${suggestions.length ? "false" : nothing}
     ?disabled=${params.submitting || params.pendingPlacement}
     placeholder=${
@@ -235,19 +230,19 @@ function renderWorktreeFields(params: {
               ${baseRefInput}
               <wa-popup
                 class="new-session-page__branch-popup"
-                anchor=${(params.idPrefix ?? "new-session") + "-worktree-base-ref"}
+                anchor="new-session-worktree-base-ref"
                 placement="bottom-start"
                 sync="width"
               >
                 <div
-                  id=${(params.idPrefix ?? "new-session") + "-worktree-branch-suggestions"}
+                  id="new-session-worktree-branch-suggestions"
                   class="new-session-page__branch-suggestions"
                   role="listbox"
                   aria-label=${t("newSession.worktreeBaseRef")}
                 >
                   ${suggestions.map(
                     (branch, index) => html`<button
-                      id=${`${params.idPrefix ?? "new-session"}-worktree-branch-suggestion-${index}`}
+                      id=${`new-session-worktree-branch-suggestion-${index}`}
                       type="button"
                       role="option"
                       aria-selected="false"
@@ -310,7 +305,6 @@ function renderWorktreeFields(params: {
 }
 
 export function renderCheckoutChip(params: {
-  idPrefix?: string;
   state: CheckoutChipState;
   remotePlacement: boolean;
   repository?: boolean;
@@ -338,7 +332,7 @@ export function renderCheckoutChip(params: {
   return html`
     <span class="new-session-page__select">
       <button
-        id=${(params.idPrefix ?? "new-session") + "-checkout-trigger"}
+        id="new-session-checkout-trigger"
         type="button"
         class="new-session-page__trigger ${
           params.popoverHiding ? "new-session-page__trigger--hiding" : ""
@@ -357,7 +351,7 @@ export function renderCheckoutChip(params: {
     <wa-popover
       ${ref(syncPopoverLabel)}
       class="new-session-page__select new-session-page__checkout-popover new-session-page__picker-popover"
-      for=${(params.idPrefix ?? "new-session") + "-checkout-trigger"}
+      for="new-session-checkout-trigger"
       placement="bottom-start"
       without-arrow
       @wa-show=${(event: Event) => {
