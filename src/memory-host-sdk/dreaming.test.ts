@@ -155,10 +155,10 @@ describe("memory dreaming host helpers", () => {
   it("uses canonical roster identities when agent aliases share a workspace", () => {
     const cfg: OpenClawConfig = {
       agents: {
-        list: [
-          { id: "Team Alpha", workspace: "/workspace/shared" },
-          { id: "team-alpha", workspace: "/workspace/shared" },
-        ],
+        entries: {
+          "Team Alpha": { workspace: "/workspace/shared" },
+          "team-alpha": { workspace: "/workspace/shared" },
+        },
       },
     };
 
@@ -171,10 +171,10 @@ describe("memory dreaming host helpers", () => {
     const cfg: OpenClawConfig = {
       agents: {
         ownership: "explicit",
-        list: [
-          { id: "alpha", workspace: "/workspace/alpha" },
-          { id: "beta", workspace: "/workspace/beta" },
-        ],
+        entries: {
+          alpha: { workspace: "/workspace/alpha" },
+          beta: { workspace: "/workspace/beta" },
+        },
       },
     };
 
@@ -236,11 +236,11 @@ describe("memory dreaming host helpers", () => {
     );
     const cfg: OpenClawConfig = {
       agents: {
-        list: [
-          { id: "alpha", default: true, workspace: workspaceDir },
-          { id: "gamma", workspace: otherWorkspaceDir },
-          { id: "beta", workspace: workspaceAliasDir },
-        ],
+        entries: {
+          alpha: { workspace: workspaceDir },
+          gamma: { workspace: otherWorkspaceDir },
+          beta: { workspace: workspaceAliasDir },
+        },
       },
     };
 
@@ -257,10 +257,10 @@ describe("memory dreaming host helpers", () => {
   it("includes the runtime primary workspace alongside configured subagent workspaces", () => {
     const cfg: OpenClawConfig = {
       agents: {
-        list: [
-          { id: "agi-ceo", default: true, workspace: "/workspace/agi-ceo" },
-          { id: "agi-cdo", workspace: "/workspace/agi-cdo" },
-        ],
+        entries: {
+          "agi-ceo": { workspace: "/workspace/agi-ceo" },
+          "agi-cdo": { workspace: "/workspace/agi-cdo" },
+        },
       },
     };
 
@@ -280,7 +280,7 @@ describe("memory dreaming host helpers", () => {
     const cfg: OpenClawConfig = {
       agents: {
         defaults: { workspace: "/workspace" },
-        entries: { main: { default: true } },
+        entries: { main: {} },
       },
     };
 
