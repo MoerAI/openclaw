@@ -24,6 +24,7 @@ import {
 } from "../../infra/update-run-activity.js";
 import {
   acknowledgeAbandonedUpdateRun,
+  createUpdateRun,
   listUpdateRuns,
   reconcileAbandonedUpdateRunsAsync,
   reconcilePackageOwnerRefusal,
@@ -87,8 +88,23 @@ export async function updateRepairCommand(opts: UpdateFinalizeOptions): Promise<
           settled.retained
             ? `Recovery evidence retained at ${settled.retained}.`
             : "The original package and launchers remain unchanged."
-        }`,
+        }${settled.detail ? ` ${settled.detail}` : ""}`,
       );
+      if (settled.detail) {
+        // The operation UUID identifies this repair receipt, not the original failed run.
+        // Replaying it after interrupted reporting preserves the original update outcome.
+        createUpdateRun(
+          {
+            runId: settled.operationId,
+            trigger: "cli",
+            settlement: {
+              reason: settled.reason,
+              detail: `${settled.detail} Operation ${settled.operationId}; evidence retained at ${settled.retained}.`,
+            },
+          },
+          options,
+        );
+      }
     }
   }
   using handoff =
@@ -112,13 +128,12 @@ export async function updateRepairCommand(opts: UpdateFinalizeOptions): Promise<
   if (admission.kind === "continuation") {
     const continuation = admission.run;
     recordUpdateRunRepairContinuation(continuation.runId, inheritedRunId, options);
-    await updateFinalizeCommand(
+    return await updateFinalizeCommand(
       opts,
       [...activeRuns, ...historicalRuns]
         .filter((run) => run.runId !== continuation.runId)
         .map((run) => run.runId),
     );
-    return;
   }
   const lastRun = recentRuns[0];
   if (
@@ -188,14 +203,12 @@ export async function updateRepairCommand(opts: UpdateFinalizeOptions): Promise<
     history.postCoreRuns.length > 0 ||
     history.incomplete
   ) {
-    await updateFinalizeCommand(opts, recoveryRunIds, handoff ?? undefined);
-    return;
+    return await updateFinalizeCommand(opts, recoveryRunIds, handoff ?? undefined);
   }
 
   const snapshot = await readConfigFileSnapshot({ skipPluginValidation: true });
   if (!snapshot.valid) {
-    await updateFinalizeCommand(opts, recoveryRunIds);
-    return;
+    return await updateFinalizeCommand(opts, recoveryRunIds);
   }
   const context = await resolveGatewayRestartProbeContext(env);
   const port = resolveGatewayPort(context.config, env);
@@ -225,8 +238,7 @@ export async function updateRepairCommand(opts: UpdateFinalizeOptions): Promise<
     http.healthz !== 200 ||
     http.readyz !== 200
   ) {
-    await updateFinalizeCommand(opts, recoveryRunIds);
-    return;
+    return await updateFinalizeCommand(opts, recoveryRunIds);
   }
 
   // Health probes await network I/O. Recheck current rows before the ledger's

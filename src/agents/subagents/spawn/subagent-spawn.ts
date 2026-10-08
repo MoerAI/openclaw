@@ -75,40 +75,32 @@ export async function spawnSubagentDirect(
     return requestResolution.result;
   }
   const {
-    request: {
-      taskName,
-      spawnMode,
-      cleanup,
-      expectsCompletionMessage,
-      completionRequesterSessionId,
-      completionRequesterLifecycleRevision,
-    },
-    runtime: {
-      hookRunner,
-      cfg,
-      runTimeoutSeconds,
-      contextMode,
-      requesterInternalKey,
-      ownership,
-      requesterAgentId,
-      targetAgentId,
-    },
-    swarm: {
-      config: swarmConfig,
-      groupId: swarmGroupId,
-      schedulerGroupKey: swarmSchedulerGroupKey,
-      launchReplayKey: swarmLaunchReplayKey,
-      soleImplicitMember,
-      reservationPending,
-      reservation: swarmReservation,
-    },
-    admission: {
-      resolve: resolveAdmission,
-      initial: admission,
-      reservation: admissionReservation,
-      childDepth,
-      maxSpawnDepth,
-    },
+    taskName,
+    spawnMode,
+    cleanup,
+    expectsCompletionMessage,
+    completionRequesterSessionId,
+    completionRequesterLifecycleRevision,
+    hookRunner,
+    cfg,
+    runTimeoutSeconds,
+    contextMode,
+    requesterInternalKey,
+    ownership,
+    requesterAgentId,
+    targetAgentId,
+    swarmConfig,
+    swarmGroupId,
+    swarmSchedulerGroupKey,
+    swarmLaunchReplayKey,
+    soleImplicitMember,
+    reservationPending,
+    swarmReservation,
+    resolveAdmission,
+    admission,
+    admissionReservation,
+    childDepth,
+    maxSpawnDepth,
     childIdem,
   } = requestResolution.resolved;
   let threadBindingReady = false;
@@ -165,6 +157,11 @@ export async function spawnSubagentDirect(
     } = childPlan.resolved;
     let { childSessionOrigin } = childPlan.resolved;
     const { resolvedModel, thinkingOverride } = plan;
+    const sessionError = (error: string): SpawnSubagentResult => ({
+      status: "error",
+      error,
+      childSessionKey,
+    });
     const initialSession = await createInitialSubagentSession({
       assertActive,
       cfg,
@@ -185,17 +182,14 @@ export async function spawnSubagentDirect(
       admissionPatch: admission.childSessionPatch,
       inheritedToolAllowlist: ctx.inheritedToolAllowlist,
       inheritedToolDenylist: ctx.inheritedToolDenylist,
+      inheritedToolPolicySource: ctx.inheritedToolPolicySource,
       modelPatch: plan.initialSessionPatch,
       swarmGroupId,
       collect: params.collect === true,
       outputSchema: params.outputSchema,
     });
     if (initialSession.status === "error") {
-      return {
-        status: "error",
-        error: initialSession.error,
-        childSessionKey,
-      };
+      return sessionError(initialSession.error);
     }
     let provisionalSessionIdentity = {
       expectedSessionId: initialSession.entry?.sessionId,
@@ -238,11 +232,7 @@ export async function spawnSubagentDirect(
     });
     if (preparedSpawnContext.status === "error") {
       await cleanupCreatedSession();
-      return {
-        status: "error",
-        error: preparedSpawnContext.error,
-        childSessionKey,
-      };
+      return sessionError(preparedSpawnContext.error);
     }
     const childEntry = preparedSpawnContext.childEntry ?? initialSession.entry;
     if (childEntry) {
@@ -271,11 +261,7 @@ export async function spawnSubagentDirect(
       });
       if (bindResult.status === "error") {
         await cleanupCreatedSession();
-        return {
-          status: "error",
-          error: bindResult.error,
-          childSessionKey,
-        };
+        return sessionError(bindResult.error);
       }
       threadBindingReady = true;
       hasBoundThreadDeliveryOrigin = hasDeliveryTargetFields(bindResult.deliveryOrigin);

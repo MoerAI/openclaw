@@ -4,6 +4,7 @@ import type { CliSessionBinding, SessionEntry } from "../../config/sessions.js";
 import type { SessionTranscriptRuntimeTarget } from "../../config/sessions/session-accessor.js";
 import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { GroupToolPolicyConfig } from "../../config/types.tools.js";
 import type { ContextEngine } from "../../context-engine/types.js";
 import type { CronScheduledToolCallerOrigin } from "../../cron/scheduled-tool-policy.js";
 import type { DiagnosticEmbeddedRunOwner } from "../../logging/diagnostic-run-activity.js";
@@ -44,7 +45,7 @@ import type { AgentHarnessIsolatedCompletionParamsV2 } from "../harness/types.js
 import type { RuntimeContextFragment } from "../internal-runtime-context.js";
 import type { ReplyExpectation } from "../reply-completion.js";
 import type { RootedExecutionRequest } from "../rooted-run-params.js";
-import type { EmbeddedRunTrigger } from "../run-trigger.js";
+import type { EmbeddedRunTrigger, IsolatedCompletionPurpose } from "../run-trigger.js";
 import type { TrustedSubagentCompletionHandoff } from "../subagents/announce/subagent-announce-handoff.js";
 import type { SilentReplyPromptMode } from "../system-prompt.types.js";
 import type { prepareCliBundleMcpConfig } from "./bundle-mcp.js";
@@ -65,6 +66,8 @@ type CliSessionRetryParams = {
 
 /** Input contract for one CLI-backed agent run. */
 export type RunCliAgentParams = {
+  /** Effective tool policy prepared by the trusted channel ingress owner. */
+  conversationToolPolicy?: GroupToolPolicyConfig;
   preparedTtsPreferences?: import("../../tts/tts-preferences.js").PreparedTtsPreferences;
   /** Verified in-process completion authority; never supplied by native CLI input. */
   trustedInternalHandoff?: TrustedSubagentCompletionHandoff;
@@ -98,6 +101,8 @@ export type RunCliAgentParams = {
   executionMode?: CliBackendExecutionMode;
   /** Internal one-shot inference path: suppress transcript, hook, context-engine, and delivery work. */
   isolatedCompletion?: true;
+  /** Diagnostic attribution only; must not change execution policy or timeout selection. */
+  isolatedCompletionPurpose?: IsolatedCompletionPurpose;
   outputTextPolicy?: AgentHarnessIsolatedCompletionParamsV2["outputTextPolicy"];
   /** Internal backend control command: reuse the native session without recording a conversation turn. */
   controlOperation?: "compact";

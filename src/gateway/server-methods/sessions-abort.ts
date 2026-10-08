@@ -26,6 +26,7 @@ import {
   isConfiguredSessionStoreAgentId,
   resolveExistingAgentSessionStoreTargetsSync,
 } from "../../config/sessions.js";
+import { composeSessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   assertAgentRunLifecycleGenerationCurrent,
@@ -358,12 +359,12 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
     const abortSessionKey = canonicalKey === "global" ? "global" : resolvedAbortSessionKey;
     const lifecycleGeneration = getAgentEventLifecycleGeneration();
     const lifecycleRevision = sessionEntry?.lifecycleRevision;
-    const assertAbortCurrent = () => {
-      authority.assertCurrent();
-      sessionMutationAuthorization?.assertCurrent();
-      requester.sessionAuthority?.assertCurrent();
-      assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
-    };
+    const assertAbortCurrent = composeSessionSourceAssertion([
+      authority.assertCurrent,
+      sessionMutationAuthorization?.assertCurrent,
+      requester.sessionAuthority?.assertCurrent,
+      () => assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration),
+    ]);
     const queueKeys = [key, ...(requestedKeyAliases ?? []), canonicalKey, sessionEntry?.sessionId];
     const clearCapturedFollowups =
       narrow && clearQueued && !requestedRunId && requiredSessionId
@@ -448,7 +449,6 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
       [...preAbortRuns].map(([runId, entry]) => [runId, captureAgentJobSession(entry)]),
     );
     let abortedRunIds: string[] = [];
-    let abortedRunId: string | null = null;
     let aborted = false;
     let chatAbortSucceeded = false;
     let failedResponse: Parameters<typeof respond> | undefined;
@@ -634,7 +634,6 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
               : [];
             const firstAbortedRunId = runIds[0] ?? null;
             abortedRunIds = runIds;
-            abortedRunId = firstAbortedRunId;
             aborted = firstAbortedRunId !== null || result?.aborted === true;
             const workerOnly = Boolean(workerRunTarget && !activeRun);
             if (firstAbortedRunId && !workerOnly) {
@@ -687,7 +686,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
       true,
       {
         ok: true,
-        abortedRunId,
+        abortedRunId: abortedRunIds[0] ?? null,
         status: aborted ? "aborted" : "no-active-run",
         ...(abortWarning ? { warning: abortWarning } : {}),
       },

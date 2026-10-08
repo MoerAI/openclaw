@@ -560,7 +560,6 @@ export function* iterateVisibleMessageRange(
         ? iterateSqliteQuerySync(
             projection.database.db,
             selectMessagePayload(
-              projection.database,
               selectMessageRows(projection.database, projection.resolved.sessionId, range),
             ),
           )
@@ -634,6 +633,7 @@ export function* iterateVisibleMessageMetadata(
   endExclusive: number,
   direction: "asc" | "desc" = "asc",
 ): IterableIterator<{
+  event_seq: number;
   message_position: number;
   serialized_bytes: number;
   logicalPosition: number;
@@ -659,6 +659,7 @@ export function* iterateVisibleMessageMetadata(
           });
     for (const row of rows) {
       yield {
+        event_seq: row.event_seq,
         message_position: row.message_position,
         serialized_bytes: row.serialized_bytes,
         // Position-based mapping preserves logical holes if a joined row is absent.

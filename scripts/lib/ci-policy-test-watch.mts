@@ -296,6 +296,7 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
     "src/agents/embedded-agent-runner/run/attempt-stream-custody.test.ts",
     "src/agents/embedded-agent-runner/run/attempt-transcript-lifecycle-prepare.test.ts",
     "src/agents/embedded-agent-runner/run/attempt.spawn-workspace.context-engine.test.ts",
+    "src/agents/embedded-agent-runner/run/attempt.spawn-workspace.orphan.test.ts",
     "src/agents/embedded-agent-runner/transcript-rewrite.test.ts",
     "src/agents/subagents/spawn/subagent-spawn.preparation-authority.test.ts",
   ].map((testFile): PolicyTestWatch => ({
@@ -413,7 +414,6 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
   ...[
     "src/agents/worktrees/empty-source.test.ts",
     "src/agents/worktrees/service.remove-lease.test.ts",
-    "src/agents/worktrees/service.snapshot-index.test.ts",
     "src/agents/worktrees/service.test.ts",
   ].map((testFile): PolicyTestWatch => ({
     testFile,
@@ -690,22 +690,6 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
       "src/state/openclaw-agent-execution.worker.ts",
     ],
   })),
-  ...[
-    "src/fleet/doctor.runtime.test.ts",
-    "src/fleet/registry-read.test.ts",
-    "src/fleet/service-removal.runtime.test.ts",
-    "src/fleet/service-upgrade.runtime.test.ts",
-  ].map((testFile): PolicyTestWatch => ({
-    testFile,
-    watchGlobs: [
-      "src/fleet/registry.kernel.ts",
-      "src/fleet/registry.worker.ts",
-      "src/state/openclaw-state-read-registry.ts",
-      "src/state/openclaw-state-read.worker.ts",
-      "src/state/openclaw-state-worker-runtime.ts",
-      "src/state/openclaw-state.worker.ts",
-    ],
-  })),
   {
     testFile: "src/gateway/board-store.test.ts",
     watchGlobs: [
@@ -756,10 +740,6 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
       "src/state/openclaw-state-read.worker.ts",
     ],
   })),
-  {
-    testFile: "src/gateway/server-methods/board.website.test.ts",
-    watchGlobs: ["src/boards/sqlite-board-store.worker.ts", "src/infra/sqlite-store.worker.ts"],
-  },
   ...[
     "src/gateway/server-methods/chat-history-handler.cli-import.test.ts",
     "src/gateway/server-methods/chat-history-registry.test.ts",
@@ -1164,20 +1144,20 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
     watchGlobs: ["src/plugin-state/plugin-state.worker.ts"],
   },
   {
-    testFile: "src/plugin-sdk/session-transcript-runtime.catalog.test.ts",
+    testFile: "src/plugin-sdk/session-transcript-runtime.test.ts",
     watchGlobs: [
       "src/config/sessions/session-cold-storage-worker.ts",
       "src/config/sessions/session-transcript-reconcile.worker.ts",
     ],
   },
   {
-    testFile: "src/plugin-sdk/session-transcript-runtime.read-fence.test.ts",
-    watchGlobs: ["src/config/sessions/session-transcript-reconcile.worker.ts"],
+    testFile: "src/plugin-sdk/session-transcript-runtime.guarded.test.ts",
+    watchGlobs: [
+      "src/config/sessions/session-cold-storage-worker.ts",
+      "src/config/sessions/session-transcript-reconcile.worker.ts",
+    ],
   },
-  ...[
-    "src/plugin-state/plugin-blob-store.readonly.test.ts",
-    "src/plugin-state/plugin-blob-store.test.ts",
-  ].map((testFile): PolicyTestWatch => ({
+  ...["src/plugin-state/plugin-blob-store.test.ts"].map((testFile): PolicyTestWatch => ({
     testFile,
     watchGlobs: [
       "src/plugin-state/plugin-blob-store.worker.ts",

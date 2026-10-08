@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import {
@@ -504,7 +504,14 @@ describe("memory manager reindex recovery", () => {
         await Promise.race([queued.promise, sync]);
         expect(publishedDb.prepare("SELECT hash FROM memory_embedding_cache").all()).toEqual([]);
         reservation?.release();
-        await reservation?.done;
+        if (scenario === "revoke") {
+          // Revocation also fences the transcript lock holding the published writer.
+          await expect(reservation?.done).rejects.toThrow(
+            /^Agent database execution admission is closed$/,
+          );
+        } else {
+          await reservation?.done;
+        }
         await expect(sync).rejects.toThrow(
           scenario === "revoke"
             ? /^Agent database execution admission is closed$/
@@ -520,8 +527,7 @@ describe("memory manager reindex recovery", () => {
         ).toEqual([]);
       } finally {
         reservation?.release();
-        await reservation?.done;
-        await sync.catch(() => undefined);
+        await Promise.allSettled([reservation?.done, sync]);
       }
     },
   );
@@ -1015,24 +1021,31 @@ describe("memory manager reindex recovery", () => {
     await memoryManager.sync({ reason: "test", force: true });
 
     const harness = memoryManager as unknown as ReindexHarness;
-
-    harness.db
-      .prepare(
-        `INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+    const databasePath = harness.db.location();
+    if (!databasePath) {
+      throw new Error("Expected the fixture's file-backed memory index");
+    }
+    {
+      // Observe the worker-published schema before injecting an orphan through a fixture writer.
+      using writer = new DatabaseSync(databasePath);
+      writer
+        .prepare(
+          `INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        "sessions-retry-chunk",
-        "sessions/retry.jsonl",
-        "sessions",
-        1,
-        1,
-        "sessions-retry-hash",
-        "fts-only",
-        "sessions retry marker",
-        encodeMemoryEmbedding([]),
-        Date.now(),
-      );
+        )
+        .run(
+          "sessions-retry-chunk",
+          "sessions/retry.jsonl",
+          "sessions",
+          1,
+          1,
+          "sessions-retry-hash",
+          "fts-only",
+          "sessions retry marker",
+          encodeMemoryEmbedding([]),
+          Date.now(),
+        );
+    }
     harness.writeMeta({
       model: "fts-only",
       provider: "none",

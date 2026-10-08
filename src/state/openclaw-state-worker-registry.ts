@@ -9,11 +9,11 @@ import type { ChannelIngressWorkerOperations } from "../channels/message/ingress
 import type { ClawProvenanceWriteOperations } from "../claws/provenance-write.worker-contract.js";
 import type { DoctorWorkerOperations } from "../commands/doctor-state.worker.js";
 import type { ConfigSnapshotWorkerOperations } from "../config/config-journal-snapshot.worker-contract.js";
-import type { FleetRegistryWriteOperations } from "../fleet/registry.worker-contract.js";
 import type { ManagedImageRecordWorkerOperations } from "../gateway/managed-image-record-store.kernel.js";
 import type { MentionWorkerOperations } from "../gateway/mention-inbox.worker-contract.js";
 import type { OperatorApprovalWorkerOperations } from "../gateway/operator-approval-store.worker-contract.js";
 import type { WorkerInferenceStoreOperations } from "../gateway/worker-environments/inference-store.worker-contract.js";
+import type { localWorkspaceOperations } from "../gateway/worker-environments/local-workspace-store.worker.js";
 import type { WorkerPlacementDispatchStoreOperations } from "../gateway/worker-environments/placement-dispatch-store.worker-contract.js";
 import type { PlacementSessionToolWorkerOperations } from "../gateway/worker-environments/placement-session-tool-operations.worker-contract.js";
 import type { PlacementTurnClaimWorkerOperations } from "../gateway/worker-environments/placement-turn-claims.worker-contract.js";
@@ -24,6 +24,7 @@ import type { WorkerTranscriptCommitOperations } from "../gateway/worker-environ
 import type { DeliveryQueueWorkerOperations } from "../infra/delivery-queue.worker-contract.js";
 import type { DevicePairingWorkerOperations } from "../infra/device-pairing-worker-contract.js";
 import type { ExecAuthorizationWorkerOperations } from "../infra/exec-approvals-authorization.worker-contract.js";
+import type { gatewayBootOperations } from "../infra/gateway-boot-lifecycle.worker.js";
 import type { CurrentConversationBindingWorkerOperations } from "../infra/outbound/current-conversation-bindings.worker.js";
 import type { PromotionWorkerOperations } from "../infra/promotions-feed.worker.js";
 import type { ApnsRegistrationWorkerOperations } from "../infra/push-apns-store.worker-contract.js";
@@ -47,11 +48,15 @@ import type {
 } from "../skills/workshop/store.worker-contract.js";
 import type { TranscriptWriteOperations } from "../transcripts/store-write.worker-contract.js";
 import type { OnboardingRecommendationWriteOperations } from "./onboarding-recommendations.kernel.js";
+import type { AgentDatabaseRegistryWorkerOperations } from "./openclaw-agent-db-contract.js";
 import type { RepositoryWorkspaceWorkerOperations } from "./session-repository-workspaces.worker-contract.js";
 import type { UserProfileWorkerOperations } from "./user-profiles.worker.js";
+import type { WorkerOperations, WorkerWriteOperationContext } from "./worker-operation-registry.js";
 import { createWorkerOperationRegistry } from "./worker-operation-registry.js";
 
-export type RegisteredStateWorkerOperations = ClawProvenanceWriteOperations &
+export type RegisteredStateWorkerOperations = WorkerOperations<typeof gatewayBootOperations> &
+  WorkerOperations<typeof localWorkspaceOperations> &
+  ClawProvenanceWriteOperations &
   GeneratedHtmlProvenanceOperations &
   MentionWorkerOperations &
   ConfigSnapshotWorkerOperations &
@@ -62,7 +67,6 @@ export type RegisteredStateWorkerOperations = ClawProvenanceWriteOperations &
   ProjectRegistryWorkerOperations &
   ApnsRegistrationWorkerOperations &
   WorktreeWorkerOperations &
-  FleetRegistryWriteOperations &
   OperatorApprovalWorkerOperations &
   ExecAuthorizationWorkerOperations &
   DeliveryQueueWorkerOperations &
@@ -89,6 +93,7 @@ export type RegisteredStateWorkerOperations = ClawProvenanceWriteOperations &
   SkillCuratorOperations &
   TranscriptWriteOperations &
   AuthProfileWorkerOperations &
+  AgentDatabaseRegistryWorkerOperations &
   PluginModelCatalogCredentialReadWorkerOperations &
   PluginRuntimeWorkerOperations &
   WorkerInferenceStoreOperations &
@@ -101,7 +106,16 @@ export type RegisteredStateWorkerOperations = ClawProvenanceWriteOperations &
   RepositoryWorkspaceWorkerOperations &
   UserProfileWorkerOperations;
 
-export const stateWorkerRegistry = createWorkerOperationRegistry<RegisteredStateWorkerOperations>({
+export const stateWorkerRegistry = createWorkerOperationRegistry<
+  RegisteredStateWorkerOperations,
+  WorkerWriteOperationContext
+>({
+  gatewayBoot: () =>
+    import("../infra/gateway-boot-lifecycle.worker.js").then((m) => m.gatewayBootOperations),
+  localWorkspace: () =>
+    import("../gateway/worker-environments/local-workspace-store.worker.js").then(
+      (m) => m.localWorkspaceOperations,
+    ),
   generatedHtmlProvenance: () =>
     import("../media/generated-html-provenance.worker.js").then(
       (m) => m.generatedHtmlProvenanceOperations,
@@ -131,6 +145,8 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<RegisteredState
       (m) => m.execAuthorizationOperations,
     ),
   userProfiles: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
+  agentDatabaseRegistry: () =>
+    import("./openclaw-agent-db-registry.worker.js").then((m) => m.agentDatabaseRegistryOperations),
   authProfiles: () =>
     import("../agents/auth-profiles/store.worker.js").then((m) => m.authProfileOperations),
   pluginModelCatalogCredentials: () =>
@@ -153,7 +169,6 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<RegisteredState
   apns: () => import("../infra/push-apns-store.worker.js").then((m) => m.apnsOperations),
   worktrees: () =>
     import("../agents/worktrees/dispatch.worker.js").then((m) => m.worktreeOperations),
-  fleet: () => import("../fleet/registry.worker.js").then((m) => m.fleetOperations),
   mcpOAuth: () => import("../agents/mcp-oauth-store.worker.js").then((m) => m.mcpOAuthOperations),
   legacyMcpOAuth: () =>
     import("../infra/state-migrations.mcp-oauth.worker.js").then((m) => m.legacyMcpOAuthOperations),
