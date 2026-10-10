@@ -129,8 +129,7 @@ export function renderChatComposer(props: ChatComposerProps) {
         : sendingForCurrentSession || submittedProgress
           ? t("chat.composer.sendingMessage")
           : t("chat.composer.working", { name: assistantName });
-  // Persistent sr-only live region: run phases are otherwise conveyed only
-  // visually (thread spark, content arriving, interrupted toast).
+  // Keep run phases accessible alongside the transcript and working indicator.
   const runStatusAnnouncement =
     composerRunStatus == null
       ? ""
@@ -150,6 +149,13 @@ export function renderChatComposer(props: ChatComposerProps) {
     getMentions().length > 0 && (mentionsUnsupported || visibleDraft.trimStart().startsWith("/"))
       ? t("chat.mentions.unsupported")
       : null;
+  const shareTypingSelection = (target: HTMLTextAreaElement) => {
+    props.onTypingChange?.(
+      Boolean(target.value.trim()),
+      target.value,
+      target.selectionDirection === "backward" ? target.selectionStart : target.selectionEnd,
+    );
+  };
   const commitMenuDraft = (next: string, mentions?: readonly HumanMention[]) => {
     commitComposerDraft(props, next, mentions);
     props.onTypingChange?.(Boolean(next.trim()), next);
@@ -335,6 +341,7 @@ export function renderChatComposer(props: ChatComposerProps) {
     ) {
       requestUpdate();
     }
+    shareTypingSelection(target);
   };
   const handleBeforeInput = (event: InputEvent) => {
     const target = event.target;
@@ -379,10 +386,17 @@ export function renderChatComposer(props: ChatComposerProps) {
       state.mentionMenu.close();
     }
     syncComposerValue(target, typedAtSign);
-    props.onTypingChange?.(Boolean(target.value.trim()), target.value);
   };
   const handleSelect = (event: Event) => {
     const target = event.target as HTMLTextAreaElement;
+    if (
+      target === document.activeElement &&
+      target.value.trim() &&
+      !state.composerComposing &&
+      !target.readOnly
+    ) {
+      shareTypingSelection(target);
+    }
     updateEmojiMenu(target);
     if (goalComposer.active) {
       return;
@@ -401,8 +415,6 @@ export function renderChatComposer(props: ChatComposerProps) {
       state.composingDraft = null;
     }
     syncComposerValue(event.target as HTMLTextAreaElement);
-    const value = (event.target as HTMLTextAreaElement).value;
-    props.onTypingChange?.(Boolean(value.trim()), value);
   };
   const handleBlur = (event: FocusEvent) => {
     clearCompositionEnd(event);
@@ -654,7 +666,6 @@ export function renderChatComposer(props: ChatComposerProps) {
     showAbortableUi,
     visibleDraft,
     runStatusAnnouncement,
-    composerRunStatus,
     requestUpdate,
     sendShortcut,
     questionPanelProps,
