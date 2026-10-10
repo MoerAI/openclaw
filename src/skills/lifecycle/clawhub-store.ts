@@ -119,6 +119,21 @@ export function formatClawHubSkillRef(ref: ClawHubSkillRef): string {
   return ref.ownerHandle ? `@${ref.ownerHandle}/${ref.slug}` : ref.slug;
 }
 
+export function describeClawHubSkillRefMismatch(
+  requested: ClawHubSkillRef,
+  tracked: Pick<ClawHubSkillRef, "ownerHandle" | "requestedReference">,
+): string | undefined {
+  const { slug } = requested;
+  if (requested.ownerHandle && tracked.ownerHandle !== requested.ownerHandle) {
+    const trackedRef = formatClawHubSkillRef({ slug, ownerHandle: tracked.ownerHandle });
+    return `Skill "${slug}" is tracked as ${trackedRef}, not @${requested.ownerHandle}/${slug}.`;
+  }
+  if (requested.requestedReference && tracked.requestedReference !== requested.requestedReference) {
+    return `Skill "${slug}" is not tracked from ${requested.requestedReference}.`;
+  }
+  return undefined;
+}
+
 export function normalizeStoredRegistry(registry: string): string {
   const trimmed = registry.trim();
   return trimmed.replace(/\/+$/, "") || trimmed;
@@ -252,15 +267,6 @@ export async function readClawHubSkillsLockfile(
   return { version: 1, skills: {} };
 }
 
-async function writeClawHubSkillsLockfile(
-  workspaceDir: string,
-  lockfile: ClawHubSkillsLockfile,
-): Promise<void> {
-  await writeJson(path.join(workspaceDir, DOT_DIR, "lock.json"), lockfile, {
-    trailingNewline: true,
-  });
-}
-
 function readJsonIfExistsSync(
   candidate: string,
 ): { exists: false } | { exists: true; value: unknown } {
@@ -345,13 +351,6 @@ export async function readClawHubSkillOriginStrict(
   return { kind: "missing" };
 }
 
-async function writeClawHubSkillOrigin(
-  skillDir: string,
-  origin: ClawHubSkillOrigin,
-): Promise<void> {
-  await writeJson(path.join(skillDir, DOT_DIR, "origin.json"), origin, { trailingNewline: true });
-}
-
 async function readInstalledSkillFileLock(
   skillDir: string,
 ): Promise<ClawHubSkillFileLock | undefined> {
@@ -371,7 +370,9 @@ export async function recordClawHubSkillInstall(
   params: Parameters<WorkspaceSkillLifecycle["recordClawHubSkillInstall"]>[0],
 ): Promise<void> {
   const { origin, verification } = params;
-  await writeClawHubSkillOrigin(params.skillDir, origin);
+  await writeJson(path.join(params.skillDir, DOT_DIR, "origin.json"), origin, {
+    trailingNewline: true,
+  });
   const lock = await readClawHubSkillsLockfile(params.workspaceDir);
   lock.skills[origin.slug] = {
     version: origin.installedVersion,
@@ -386,7 +387,9 @@ export async function recordClawHubSkillInstall(
     ...(origin.fileTreeSha256 ? { fileTreeSha256: origin.fileTreeSha256 } : {}),
     ...(verification ? { verification } : {}),
   };
-  await writeClawHubSkillsLockfile(params.workspaceDir, lock);
+  await writeJson(path.join(params.workspaceDir, DOT_DIR, "lock.json"), lock, {
+    trailingNewline: true,
+  });
 }
 
 export function resolveWorkspaceClawHubSkills(workspaceDir: string) {

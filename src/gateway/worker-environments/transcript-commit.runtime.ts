@@ -1,6 +1,4 @@
-import { createHash } from "node:crypto";
 import { stableStringify } from "@openclaw/normalization-core";
-import type { WorkerTranscriptCommitParams } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import type { BoundAgentRunSessionTarget } from "../../agents/run-session-target.types.js";
 import { redactTranscriptMessage } from "../../agents/transcript-redact.js";
 import {
@@ -22,6 +20,7 @@ import {
   withOwnedSessionTranscriptWriterFence,
 } from "../../config/sessions/transcript-write-context.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { sha256Base64Url, sha256Hex } from "../../infra/crypto-digest.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
@@ -34,6 +33,7 @@ import {
 } from "../../sessions/transcript-events.js";
 import { captureOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import { openOpenClawAgentSqliteWorkerStore } from "../../state/openclaw-agent-worker-store.js";
+import { readTranscriptMessageIdempotencyKey } from "../session-transcript-entry-message.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { prepareWorkerTurnTranscriptMessage } from "./placement-turn-claim-events.js";
 import type {
@@ -58,34 +58,12 @@ import type { WorkerTranscriptOperations } from "./transcript-commit.worker.js";
 const log = createSubsystemLogger("gateway/worker-transcript");
 const moduleUrl = resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.workerTranscriptCommit);
 
-function requestHash(request: WorkerTranscriptCommitParams): string {
-  return createHash("sha256")
-    .update(
-      stableStringify({
-        baseLeafId: request.baseLeafId,
-        messages: request.messages,
-      }),
-    )
-    .digest("hex");
-}
-
-function messageIdempotencyKey(params: {
-  sessionId: string;
-  runEpoch: number;
-  seq: number;
-  index: number;
-}): string {
-  const digest = createHash("sha256")
-    .update([params.sessionId, params.runEpoch, params.seq, params.index].join("\0"))
-    .digest("base64url");
-  return `worker-commit-${digest}`;
-}
-
 async function applyWorkerTranscriptCommit(params: {
   assertCurrent: () => undefined;
   config: OpenClawConfig;
   identity: WorkerConnectionIdentity;
   messages: readonly CommittedAgentMessage[];
+  assistantItemIds: ReadonlyMap<string, string>;
   recoverPersistedBatch: boolean;
   requestedBaseLeafId: string | null;
   runId: string | null;
@@ -167,9 +145,13 @@ async function applyWorkerTranscriptCommit(params: {
         { moduleUrl, input: undefined },
       );
       const value = await worker.run(async (writer): Promise<ApplyTranscriptCommitResult> => {
+        const databaseIdentity = execution.fileIdentity;
+        if (!databaseIdentity) {
+          throw new Error("Worker transcript has no prepared database identity");
+        }
         const plan = await writer.execute({
           type: "transcript.prepare",
-          input: { ...input, scope: { ...scope, storePath: execution.path } },
+          input: { ...input, scope: { ...scope, storePath: databaseIdentity.nativeLocation } },
         });
         assertCurrent();
         if (!plan.ok || plan.messages.length === input.messages.length) {
@@ -180,16 +162,12 @@ async function applyWorkerTranscriptCommit(params: {
           return { ok: false, reason: "invalid-batch" };
         }
         assertCurrent();
-        const databaseIdentity = execution.fileIdentity?.physicalIdentity;
-        if (!databaseIdentity) {
-          throw new Error("Worker transcript has no prepared database identity");
-        }
         const committed = await writer.execute({ type: "transcript.commit", input: { messages } });
         if (committed.result.ok && committed.result.messages.some((message) => message.appended)) {
           publishSessionEntryWorkerMetadataInvalidation({
             agentId: target.agentId,
             storePath: execution.path,
-            databaseIdentity,
+            databaseIdentity: databaseIdentity.physicalIdentity,
             sessionKey: target.sessionKey,
           });
         }
@@ -243,7 +221,13 @@ async function applyWorkerTranscriptCommit(params: {
   }
 
   for (const message of applied.messages) {
-    if (!message.appended) {
+    const itemId =
+      message.message.role === "assistant"
+        ? params.assistantItemIds.get(readTranscriptMessageIdempotencyKey(message.message) ?? "")
+        : undefined;
+    // Pending recovery can find a committed row whose original publication was lost.
+    // A recovered sequence certifies active-branch membership; abandoned rows stay silent.
+    if (!message.appended && (!itemId || message.messageSeq === undefined)) {
       continue;
     }
     const runId = resolveTerminalAssistantTranscriptRunId(message.message, params.runId);
@@ -252,6 +236,7 @@ async function applyWorkerTranscriptCommit(params: {
       message: message.message,
       messageId: message.messageId,
       messageSeq: message.messageSeq,
+      ...(itemId ? { assistantItemIds: [itemId] } : {}),
       ...(runId ? { runId } : {}),
     });
   }
@@ -269,24 +254,33 @@ export async function commitWorkerTranscript(
     sessionId,
     runEpoch: params.request.runEpoch,
     seq: params.request.seq,
-    requestHash: requestHash(params.request),
+    requestHash: sha256Hex(
+      stableStringify({ baseLeafId: params.request.baseLeafId, messages: params.request.messages }),
+    ),
   };
+  const complete = (outcome: WorkerTranscriptCommitOutcome) =>
+    store.complete({ ...input, outcome }, params.assertCurrent);
   const config = options.getConfig();
   const target = withOwnedSessionTranscriptWriterFence({
     ...captureSessionTranscriptTargetBinding(params.sessionTarget),
     expectedLifecycleRevision: params.sessionTarget.expectedLifecycleRevision,
     expectedWriterRunId: params.sessionTarget.expectedWriterRunId,
   });
-  // Ingress validated the closed schema; clone every admitted field before transcript redaction.
-  const messages = params.request.messages.map((message, index) => ({
-    ...structuredClone(message),
-    idempotencyKey: messageIdempotencyKey({
-      sessionId,
-      runEpoch: params.request.runEpoch,
-      seq: params.request.seq,
-      index,
-    }),
-  }));
+  const assistantItemIds = new Map<string, string>();
+  // Correlation belongs to the commit receipt, never stored or provider-visible content.
+  const messages = params.request.messages.map((message, index) => {
+    const idempotencyKey = `worker-commit-${sha256Base64Url(
+      [sessionId, params.request.runEpoch, params.request.seq, index].join("\0"),
+    )}`;
+    if (message.role === "assistant") {
+      const { itemId, ...assistant } = structuredClone(message);
+      if (itemId) {
+        assistantItemIds.set(idempotencyKey, itemId);
+      }
+      return { ...assistant, idempotencyKey };
+    }
+    return { ...structuredClone(message), idempotencyKey };
+  });
   const requestedBaseLeafId = params.request.baseLeafId;
   params.assertCurrent();
   const started = await store.begin(input, params.assertCurrent);
@@ -314,6 +308,7 @@ export async function commitWorkerTranscript(
       config,
       identity: params.identity,
       messages,
+      assistantItemIds,
       recoverPersistedBatch: started.kind === "recover",
       requestedBaseLeafId,
       runId: params.identity.runId,
@@ -328,27 +323,12 @@ export async function commitWorkerTranscript(
     throw error;
   }
   if (!applied.ok) {
-    return await store.complete(
-      { ...input, outcome: { ok: false, reason: applied.reason } },
-      params.assertCurrent,
-    );
+    return await complete({ ok: false, reason: applied.reason });
   }
   const entryIds = applied.messages.map((message) => message.messageId);
   const newLeafId = entryIds.at(-1);
   if (entryIds.length !== messages.length || !newLeafId) {
-    return await store.complete(
-      {
-        ...input,
-        outcome: { ok: false, reason: "invalid-batch" },
-      },
-      params.assertCurrent,
-    );
+    return await complete({ ok: false, reason: "invalid-batch" });
   }
-  return await store.complete(
-    {
-      ...input,
-      outcome: { ok: true, result: { entryIds, newLeafId } },
-    },
-    params.assertCurrent,
-  );
+  return await complete({ ok: true, result: { entryIds, newLeafId } });
 }

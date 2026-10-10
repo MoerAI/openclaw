@@ -1,16 +1,19 @@
 // Plugin state SQLite helpers persist plugin state in the OpenClaw state database.
 import type { DatabaseSync } from "node:sqlite";
 import { err, ok, type Result } from "@openclaw/normalization-core/result";
+import type { ExpressionBuilder } from "kysely";
 import { executeSqliteQuerySync } from "../infra/kysely-sync.js";
 import { isSqliteCorruptionError } from "../infra/sqlite-error-diagnostics.js";
 import { normalizeSqliteNumber } from "../infra/sqlite-number.js";
 import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
+import type { DB } from "../state/openclaw-state-db.generated.js";
 import {
   closeOpenClawStateDatabase,
   closeOpenClawStateDatabaseAsync,
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { pluginStatePublication } from "./plugin-state-publication.js";
 import {
   runWriteTransaction,
   withPluginStateDatabaseReadOnly,
@@ -308,6 +311,22 @@ export function pluginStateDeleteIf(params: {
   );
 }
 
+export function observedPluginStateRow(
+  eb: ExpressionBuilder<Pick<DB, "plugin_state_entries">, "plugin_state_entries">,
+  scope: { pluginId: string; namespace: string },
+  entry: PluginDoctorRawStateEntry,
+) {
+  return eb
+    .and({
+      plugin_id: scope.pluginId,
+      namespace: scope.namespace,
+      entry_key: entry.key,
+      value_json: entry.valueJson,
+      created_at: entry.createdAt,
+    })
+    .and("expires_at", entry.expiresAt === null ? "is" : "=", entry.expiresAt);
+}
+
 /** Deletes one bounded set of exact observed rows in a single synchronous transaction. */
 export function pluginStateDeleteEntriesIfUnchanged(params: {
   pluginId: string;
@@ -332,18 +351,13 @@ export function pluginStateDeleteEntriesIfUnchanged(params: {
       params.assertOwnedInTransaction(db);
       let deleted = 0;
       for (const entry of observed) {
-        let query = getPluginStateKysely(db)
+        const query = getPluginStateKysely(db)
           .deleteFrom("plugin_state_entries")
-          .where("plugin_id", "=", params.pluginId)
-          .where("namespace", "=", params.namespace)
-          .where("entry_key", "=", entry.key)
-          .where("value_json", "=", entry.valueJson)
-          .where("created_at", "=", entry.createdAt);
-        query =
-          entry.expiresAt === null
-            ? query.where("expires_at", "is", null)
-            : query.where("expires_at", "=", entry.expiresAt);
-        deleted += Number(executeSqliteQuerySync(db, query).numAffectedRows ?? 0);
+          .where((eb) => observedPluginStateRow(eb, params, entry))
+          .returning(["plugin_id", "namespace", "entry_key"]);
+        const result = executeSqliteQuerySync(db, query);
+        pluginStatePublication.stageDeletions(db, result.rows);
+        deleted += result.rows.length;
       }
       return { deleted, changed: observed.length - deleted };
     },
@@ -361,7 +375,6 @@ export function pluginStateDoctorEntriesInKeyRange(params: {
   env?: NodeJS.ProcessEnv;
 }): PluginDoctorRawStateEntry[] {
   if (
-    !params.prefix ||
     !Number.isSafeInteger(params.limit) ||
     params.limit < 1 ||
     params.limit > MAX_PLUGIN_STATE_BULK_DELETE_ENTRIES ||
@@ -479,10 +492,6 @@ export function getPluginStateCapacity(
   };
 }
 
-export function closePluginStateDatabase(): void {
-  closeOpenClawStateDatabase();
-}
+export const closePluginStateDatabase: () => void = closeOpenClawStateDatabase;
 
-export async function closePluginStateDatabaseAsync(): Promise<void> {
-  await closeOpenClawStateDatabaseAsync();
-}
+export const closePluginStateDatabaseAsync: () => Promise<void> = closeOpenClawStateDatabaseAsync;
