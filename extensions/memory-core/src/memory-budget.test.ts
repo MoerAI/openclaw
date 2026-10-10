@@ -287,6 +287,21 @@ describe("compactMemoryForBudget — bounded MEMORY.md compaction (regression fo
       name: "a lineage marker that no promotion entry follows",
       tail: ["<!-- openclaw-memory-lineage:memory:memory/2026-09-01.md:9:9 -->", "- user bullet"],
     },
+    {
+      name: "an inline note beside a lineage marker",
+      tail: [
+        "<!-- openclaw-memory-lineage:memory:memory/2026-09-01.md:9:9 --> <!-- USER-AUTHORED: keep this note. -->",
+        "<!-- openclaw-memory-promotion:memory:memory/2026-09-01.md:9:9 -->",
+        "- annotated entry",
+      ],
+    },
+    {
+      name: "an inline note beside a promotion marker",
+      tail: [
+        "<!-- openclaw-memory-promotion:memory:memory/2026-09-01.md:9:9 --> <!-- USER-AUTHORED: keep this note. -->",
+        "- annotated entry",
+      ],
+    },
   ])("preserves a consolidation section holding $name", ({ tail }) => {
     const existing = [consolidatedSection("2026-09-01").trimStart(), ...tail, ""].join("\n");
     const result = compactMemoryForBudget({
