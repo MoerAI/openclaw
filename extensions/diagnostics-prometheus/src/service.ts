@@ -15,16 +15,9 @@ import type {
   OpenClawPluginServiceContext,
 } from "../api.js";
 import { isInternalDiagnosticEventMetadata, redactSensitiveText } from "../api.js";
+import { seconds, type LabelSet } from "./prometheus-format.js";
 import {
-  escapeHelp,
-  formatLabelEntry,
-  formatLabels,
-  formatPrometheusNumber,
-  seconds,
-  sortedLabels,
-  type LabelSet,
-} from "./prometheus-format.js";
-import {
+  AGENT_DURATION_BUCKETS_SECONDS,
   createPrometheusMetricStore,
   type PrometheusMetricStore,
 } from "./prometheus-metric-store.js";
@@ -32,6 +25,10 @@ import { recordChildProcessSpawn } from "./service-child-process.js";
 import { recordMemorySample } from "./service-memory.js";
 import { recordModelUsage } from "./service-model-usage.js";
 import { recordOperationTimingEvent } from "./service-operation-timing.js";
+import {
+  createGatewayWorkMetricsRecorder,
+  recordSessionDiagnosticEvent,
+} from "./service-sessions.js";
 import { recordWorkerRequest } from "./service-worker.js";
 
 const BYTE_BUCKETS = [
@@ -48,63 +45,6 @@ function safeErrorMessage(err: unknown): string {
       .replace(/[\r\n\t\u2028\u2029]/gu, " "),
     500,
   );
-}
-
-function renderPrometheusMetrics(store: PrometheusMetricStore): string {
-  const snapshot = store.snapshot();
-  const lines: string[] = [];
-  const emitted = new Set<string>();
-
-  const emitHeader = (name: string, type: "counter" | "gauge" | "histogram", help: string) => {
-    if (emitted.has(name)) {
-      return;
-    }
-    emitted.add(name);
-    lines.push(`# HELP ${name} ${escapeHelp(help)}`);
-    lines.push(`# TYPE ${name} ${type}`);
-  };
-
-  for (const [type, entries] of [
-    ["counter", snapshot.counters],
-    ["gauge", snapshot.gauges],
-  ] as const) {
-    entries.sort(([left], [right]) => left.localeCompare(right));
-    for (const [key, sample] of entries) {
-      const name = key.split("|", 1)[0] ?? "";
-      emitHeader(name, type, sample.help);
-      lines.push(`${name}${formatLabels(sample.labels)} ${formatPrometheusNumber(sample.value)}`);
-    }
-  }
-
-  snapshot.histograms.sort(([left], [right]) => left.localeCompare(right));
-  for (const [key, sample] of snapshot.histograms) {
-    const name = key.split("|", 1)[0] ?? "";
-    emitHeader(name, "histogram", sample.help);
-    const labels = formatLabels(sample.labels);
-    const bucketLabels = sortedLabels({ ...sample.labels, le: "" });
-    const boundIndex = bucketLabels.findIndex(([labelKey]) => labelKey === "le");
-    const bucketFragments = bucketLabels.map(formatLabelEntry);
-    // Only the bound changes between buckets; reuse sorted, escaped labels within this scrape.
-    for (let index = 0; index < sample.buckets.length; index += 1) {
-      const bucket = sample.buckets[index];
-      if (bucket === undefined) {
-        continue;
-      }
-      bucketFragments[boundIndex] = `le="${String(bucket)}"`;
-      lines.push(
-        `${name}_bucket{${bucketFragments.join(",")}} ${formatPrometheusNumber(sample.counts[index] ?? 0)}`,
-      );
-    }
-    bucketFragments[boundIndex] = 'le="+Inf"';
-    lines.push(
-      `${name}_bucket{${bucketFragments.join(",")}} ${formatPrometheusNumber(sample.count)}`,
-    );
-    lines.push(`${name}_sum${labels} ${formatPrometheusNumber(sample.sum)}`);
-    lines.push(`${name}_count${labels} ${formatPrometheusNumber(sample.count)}`);
-  }
-
-  lines.push("");
-  return lines.join("\n");
 }
 
 function webhookLabels(
@@ -135,30 +75,13 @@ function recordDiagnosticEvent(
       }
       return;
     case "diagnostic.phase.completed":
+    case "secret.egress":
+    case "tool.catalog":
     case "gateway.rpc":
-      recordOperationTimingEvent(store, evt, metadata);
-      return;
+    case "gateway.http.cancelled":
     case "diagnostic.gc":
-      store.histogram(
-        "openclaw_gc_duration_seconds",
-        "Elapsed garbage collection duration in seconds for the hosting JavaScript isolate.",
-        {},
-        seconds(evt.durationMs),
-      );
-      return;
     case "gateway.event_loop.sample":
-      store.histogram(
-        "openclaw_gateway_event_loop_delay_max_seconds",
-        "Maximum event-loop delay per completed Gateway observation window in seconds.",
-        {},
-        seconds(evt.delayMaxMs),
-      );
-      store.counter(
-        "openclaw_gateway_event_loop_observed_seconds_total",
-        "Elapsed seconds covered by completed Gateway event-loop observation windows.",
-        {},
-        evt.intervalMs / 1000,
-      );
+      recordOperationTimingEvent(store, evt, metadata);
       return;
     case "model.usage":
       recordModelUsage(store, evt);
@@ -177,6 +100,7 @@ function recordDiagnosticEvent(
         "Agent run duration in seconds.",
         labels,
         seconds(evt.durationMs),
+        AGENT_DURATION_BUCKETS_SECONDS,
       );
       store.counter("openclaw_run_completed_total", "Agent runs completed by outcome.", labels);
       return;
@@ -200,6 +124,7 @@ function recordDiagnosticEvent(
         "Model request or synthetic agent-turn duration in seconds.",
         labels,
         seconds(evt.durationMs),
+        AGENT_DURATION_BUCKETS_SECONDS,
       );
       store.counter(
         "openclaw_model_call_total",
@@ -296,6 +221,7 @@ function recordDiagnosticEvent(
         "Agent harness run duration in seconds.",
         labels,
         seconds(evt.durationMs),
+        AGENT_DURATION_BUCKETS_SECONDS,
       );
       store.counter(
         "openclaw_harness_run_total",
@@ -388,6 +314,7 @@ function recordDiagnosticEvent(
         "Inbound message dispatch duration in seconds.",
         labels,
         seconds(evt.durationMs),
+        AGENT_DURATION_BUCKETS_SECONDS,
       );
       return;
     }
@@ -440,31 +367,9 @@ function recordDiagnosticEvent(
       return;
     }
     case "session.recovery.requested":
-    case "session.recovery.completed": {
-      const labels = {
-        action:
-          evt.type === "session.recovery.completed"
-            ? normalizeDiagnosticValue(evt.action, "unknown")
-            : evt.allowActiveAbort
-              ? "abort"
-              : "recover",
-        active_work_kind: normalizeDiagnosticValue(evt.activeWorkKind, "none"),
-        state: evt.state,
-        status: evt.type === "session.recovery.completed" ? evt.status : "requested",
-      };
-      store.counter(
-        "openclaw_session_recovery_total",
-        "Session recovery observations by status and action.",
-        labels,
-      );
-      store.histogram(
-        "openclaw_session_recovery_age_seconds",
-        "Age of sessions selected for recovery in seconds.",
-        labels,
-        seconds(evt.ageMs),
-      );
+    case "session.recovery.completed":
+      recordSessionDiagnosticEvent(store, evt);
       return;
-    }
     case "queue.lane.enqueue":
     case "queue.lane.dequeue":
       store.gauge(
@@ -485,45 +390,9 @@ function recordDiagnosticEvent(
       }
       return;
     case "session.state":
-      store.counter("openclaw_session_state_total", "Session state observations.", {
-        reason: normalizeDiagnosticValue(evt.reason, "none"),
-        state: evt.state,
-      });
-      if (evt.queueDepth !== undefined) {
-        store.gauge(
-          "openclaw_session_queue_depth",
-          "Latest observed session queue depth.",
-          {
-            state: evt.state,
-          },
-          numericValue(evt.queueDepth),
-        );
-      }
-      return;
-    case "session.stuck": {
-      const labels = {
-        reason: normalizeDiagnosticValue(evt.reason, "none"),
-        state: evt.state,
-      };
-      store.counter(
-        "openclaw_session_stuck_total",
-        "Stale session bookkeeping observations with no active work.",
-        labels,
-      );
-      store.histogram(
-        "openclaw_session_stuck_age_seconds",
-        "Age of stale session bookkeeping observations in seconds.",
-        labels,
-        seconds(evt.ageMs),
-      );
-      return;
-    }
+    case "session.stuck":
     case "session.turn.created":
-      store.counter("openclaw_session_turn_created_total", "Agent session turns created.", {
-        agent: normalizeDiagnosticValue(evt.agentId),
-        channel: normalizeDiagnosticValue(evt.channel),
-        trigger: evt.trigger,
-      });
+      recordSessionDiagnosticEvent(store, evt);
       return;
     case "diagnostic.child_process.spawn":
       recordChildProcessSpawn(store, evt);
@@ -680,7 +549,7 @@ function createMetricsHandler(store: PrometheusMetricStore): OpenClawPluginHttpR
       return true;
     }
 
-    const body = renderPrometheusMetrics(store);
+    const body = store.render();
     res.statusCode = 200;
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
@@ -709,6 +578,7 @@ type TrustedExporterDiagnosticsBridge = NonNullable<
 export function createDiagnosticsPrometheusExporter() {
   const store = createPrometheusMetricStore();
   let unsubscribe: (() => void) | undefined;
+  let unsubscribeWork: (() => void) | undefined;
   let internalDiagnostics: TrustedExporterDiagnosticsBridge | undefined;
   const reportExporterStatus = (update: PrometheusExporterHealthUpdate) => {
     try {
@@ -747,6 +617,9 @@ export function createDiagnosticsPrometheusExporter() {
           1,
         );
       }
+      unsubscribeWork = ctx.internalDiagnostics?.onGatewayWorkMetrics?.(
+        createGatewayWorkMetricsRecorder(store),
+      );
       unsubscribe = subscribe(
         (event, metadata) => {
           try {
@@ -770,6 +643,8 @@ export function createDiagnosticsPrometheusExporter() {
       });
     },
     stop() {
+      unsubscribeWork?.();
+      unsubscribeWork = undefined;
       unsubscribe?.();
       unsubscribe = undefined;
       reportExporterStatus({
@@ -784,9 +659,7 @@ export function createDiagnosticsPrometheusExporter() {
 
   return {
     handler: createMetricsHandler(store),
-    render: () => renderPrometheusMetrics(store),
+    render: store.render,
     service,
   };
 }
-
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

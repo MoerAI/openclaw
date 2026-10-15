@@ -1,4 +1,3 @@
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { MAX_IMAGE_BYTES, saveRemoteMedia } from "openclaw/plugin-sdk/media-runtime";
 import { TLON_MEDIA_FETCH_TIMEOUTS } from "../media-fetch-timeouts.js";
 
@@ -24,16 +23,13 @@ export function buildTlonInboundMediaPrompt(
   return { body: `${mediaLines}\n${messageText}`, media };
 }
 
-/**
- * Extract image blocks from Tlon message content.
- * Returns up to the download cap plus the number omitted by that cap.
- */
+// Retain the number omitted by the download cap for the unavailable-media notice.
 function extractImageBlocks(content: unknown) {
-  if (!content || !Array.isArray(content)) {
+  if (!Array.isArray(content)) {
     return { images: [], unavailableCount: 0 };
   }
 
-  const images: Array<{ url: string }> = [];
+  const images: string[] = [];
   let unavailableCount = 0;
 
   for (const verse of content) {
@@ -42,7 +38,7 @@ function extractImageBlocks(content: unknown) {
         unavailableCount++;
         continue;
       }
-      images.push({ url: verse.block.image.src });
+      images.push(verse.block.image.src);
     }
   }
 
@@ -51,10 +47,9 @@ function extractImageBlocks(content: unknown) {
 
 async function downloadMedia(url: string, maxBytes?: number): Promise<TlonInboundMedia | null> {
   try {
-    // Validate URL is http/https before fetching
     const parsedUrl = new URL(url);
     if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      console.warn(`[tlon-media] Rejected non-http(s) URL: ${url}`);
+      console.warn("[tlon-media] Rejected non-http(s) media URL");
       return null;
     }
 
@@ -69,23 +64,19 @@ async function downloadMedia(url: string, maxBytes?: number): Promise<TlonInboun
       path: saved.path,
       contentType: saved.contentType ?? "application/octet-stream",
     };
-  } catch (error: unknown) {
-    console.error(`[tlon-media] Error downloading ${url}: ${formatErrorMessage(error)}`);
+  } catch {
+    console.error("[tlon-media] Error downloading inbound media");
     return null;
   }
 }
 
-/**
- * Download all images from a message and return attachment metadata.
- * Format matches OpenClaw's expected attachment structure.
- */
 export async function downloadMessageImages(content: unknown, maxBytes?: number) {
   const { images, unavailableCount: overCapCount } = extractImageBlocks(content);
   const attachments: TlonInboundMedia[] = [];
   let unavailableCount = overCapCount;
 
-  for (const image of images) {
-    const downloaded = await downloadMedia(image.url, maxBytes);
+  for (const url of images) {
+    const downloaded = await downloadMedia(url, maxBytes);
     if (downloaded) {
       attachments.push(downloaded);
     } else {

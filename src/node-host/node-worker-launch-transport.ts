@@ -3,6 +3,7 @@ import {
   WORKER_LINEAGE_START_PROTOCOL_FEATURE,
   WORKER_NATIVE_PROCESS_OWNER_PROTOCOL_FEATURE,
 } from "../../packages/gateway-protocol/src/schema/worker-admission.js";
+import { NODE_WORKER_INFERENCE_SETUP_ERROR } from "../infra/node-runner-inventory.js";
 import { resolveRuntimeArgs } from "../infra/runtime-worker-url.js";
 import {
   createChildAdapter,
@@ -55,6 +56,7 @@ export type NodeWorkerChildAdapter = AwaitedStdoutChildAdapter & {
 type NodeWorkerLaunchTransportOptions = {
   bundleRoot: string;
   workerEnv: NodeJS.ProcessEnv;
+  homeDir?: string;
   nativeInferenceSnapshot?: NodeWorkerNativeInferenceSnapshot;
   engineEnv: NodeJS.ProcessEnv;
   input: NodeWorkerLaunchInput;
@@ -89,11 +91,12 @@ export async function prepareNodeWorkerLaunchTransport(
   if (options.descriptor.assignment.inference === "runtime-local") {
     if (options.containerEngine) {
       throw new Error(
-        "Node worker native inference requires isolation none, not a nested container",
+        'Worker-local inference requires nodeHost.workerRuns.isolation to be "none"; ' +
+          "nested-container worker isolation is unsupported.",
       );
     }
     if (!options.nativeInferenceSnapshot) {
-      throw new Error("Node worker native inference requires node-local startup configuration");
+      throw new Error(NODE_WORKER_INFERENCE_SETUP_ERROR);
     }
     const startup = projectNodeWorkerNativeInference(
       options.nativeInferenceSnapshot,
@@ -101,7 +104,10 @@ export async function prepareNodeWorkerLaunchTransport(
     );
     const encoded = JSON.stringify(startup);
     if (Buffer.byteLength(encoded) > WORKER_NATIVE_INFERENCE_STARTUP_MAX_BYTES) {
-      throw new Error("Node worker native inference startup configuration exceeds the size limit");
+      throw new Error(
+        "Worker-local inference startup data exceeds 2 MiB. Reduce the configured node models " +
+          "or headers, then restart the node host.",
+      );
     }
     secretInput = {
       fd: WORKER_NATIVE_INFERENCE_STARTUP_FD,
@@ -202,6 +208,7 @@ export async function prepareNodeWorkerLaunchTransport(
       bundleRoot: options.bundleRoot,
       bundleEntry: entry,
       workspaceDir: options.descriptor.assignment.workspaceDir,
+      homeDir: options.homeDir,
       gatewayNamespace: options.input.gatewayNamespace,
       launchId: options.input.launchId,
       env: workerEnv,
