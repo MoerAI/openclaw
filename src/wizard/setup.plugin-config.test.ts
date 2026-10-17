@@ -10,7 +10,15 @@ import type { WizardMultiSelectParams, WizardPrompter } from "./prompts.js";
 import { setupPluginConfig } from "./setup.plugin-config.js";
 
 const loadPluginManifestRegistryCore = vi.fn();
+const readBundledDiscoveryModeMock = vi.fn<() => "compat" | "allowlist" | undefined>();
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+afterEach(() => {
+  readBundledDiscoveryModeMock.mockReset();
+});
+vi.mock("../plugins/bundled-discovery-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../plugins/bundled-discovery-state.js")>()),
+  readBundledDiscoveryModeMemoized: () => readBundledDiscoveryModeMock(),
+}));
 vi.mock("../plugins/plugin-metadata-snapshot.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../plugins/plugin-metadata-snapshot.js")>()),
   loadPluginMetadataSnapshot: () => {
@@ -71,18 +79,21 @@ describe("plugin configuration discovery", () => {
     name: string;
     config: OpenClawConfig;
     manifest: Partial<PluginManifestRecord>;
+    bundledDiscoveryMode?: "compat" | "allowlist";
     offered: boolean;
   }>([
     {
       name: "explicit disablement over a manifest default",
       config: { plugins: { entries: { fixture: { enabled: false } } } },
-      manifest: {},
+      manifest: { providers: ["fixture-provider"] },
+      bundledDiscoveryMode: "compat",
       offered: false,
     },
     {
       name: "global disablement",
       config: { plugins: { enabled: false } },
-      manifest: {},
+      manifest: { providers: ["fixture-provider"] },
+      bundledDiscoveryMode: "compat",
       offered: false,
     },
     {
@@ -98,9 +109,37 @@ describe("plugin configuration discovery", () => {
       offered: false,
     },
     {
+      name: "a bundled model provider in compatibility mode",
+      config: { plugins: { allow: ["other"] } },
+      manifest: { providers: ["fixture-provider"] },
+      bundledDiscoveryMode: "compat",
+      offered: true,
+    },
+    {
+      name: "a contract-only bundled provider in compatibility mode",
+      config: { plugins: { allow: ["other"] } },
+      manifest: { contracts: { speechProviders: ["fixture-provider"] } },
+      bundledDiscoveryMode: "compat",
+      offered: true,
+    },
+    {
+      name: "a contract-only bundled provider in strict allowlist mode",
+      config: { plugins: { allow: ["other"] } },
+      manifest: { contracts: { speechProviders: ["fixture-provider"] } },
+      bundledDiscoveryMode: "allowlist",
+      offered: false,
+    },
+    {
       name: "untrusted workspace origin",
       config: {},
       manifest: { origin: "workspace" },
+      offered: false,
+    },
+    {
+      name: "workspace trust before bundled-provider compatibility",
+      config: { plugins: { allow: ["other"] } },
+      manifest: { origin: "workspace", providers: ["fixture-provider"] },
+      bundledDiscoveryMode: "compat",
       offered: false,
     },
     {
@@ -159,7 +198,8 @@ describe("plugin configuration discovery", () => {
     },
   ])(
     "uses effective activation for $name",
-    async ({ config, manifest: manifestOverrides, offered }) => {
+    async ({ config, manifest: manifestOverrides, bundledDiscoveryMode, offered }) => {
+      readBundledDiscoveryModeMock.mockReturnValue(bundledDiscoveryMode);
       loadPluginManifestRegistryCore.mockReturnValue({
         plugins: [{ ...makeManifestPlugin("fixture", { mode: {} }), ...manifestOverrides }],
       });
