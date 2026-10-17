@@ -131,16 +131,50 @@ async function listEnabledConfigurableManifestPlugins(params: {
   config: OpenClawConfig;
   workspaceDir?: string;
 }): Promise<readonly PluginManifestRecord[]> {
-  const { loadPluginMetadataSnapshot } = await loadPluginMetadataSnapshotModule();
+  const [
+    { loadPluginMetadataSnapshot },
+    { applyPluginAutoEnable },
+    { resolvePluginActivationSourceConfig },
+    { createPluginActivationSource, normalizePluginsConfig, resolveEffectivePluginActivationState },
+    { isPluginEnabledByDefaultForPlatform },
+  ] = await Promise.all([
+    loadPluginMetadataSnapshotModule(),
+    import("../config/plugin-auto-enable.js"),
+    import("../plugins/activation-source-config.js"),
+    import("../plugins/config-state.js"),
+    import("../plugins/default-enablement.js"),
+  ]);
   const snapshot = loadPluginMetadataSnapshot({
     config: params.config,
     workspaceDir: params.workspaceDir,
     env: process.env,
   });
-  return snapshot.plugins.filter((plugin) => {
-    const entry = params.config.plugins?.entries?.[plugin.id];
-    return plugin.enabledByDefault || entry?.enabled === true;
+  // Activation is a local projection; skipping must preserve the caller's authored config.
+  const autoEnabled = applyPluginAutoEnable({
+    config: params.config,
+    env: process.env,
+    manifestRegistry: snapshot.manifestRegistry,
+    discovery: snapshot.discovery,
   });
+  const normalized = normalizePluginsConfig(autoEnabled.config.plugins);
+  const sourceConfig = resolvePluginActivationSourceConfig({ config: params.config });
+  const activationSource = createPluginActivationSource({
+    config: sourceConfig,
+    plugins: sourceConfig.plugins === autoEnabled.config.plugins ? normalized : undefined,
+  });
+  return snapshot.plugins.filter(
+    (plugin) =>
+      resolveEffectivePluginActivationState({
+        id: plugin.id,
+        origin: plugin.origin,
+        channelIds: plugin.channels,
+        config: normalized,
+        rootConfig: autoEnabled.config,
+        enabledByDefault: isPluginEnabledByDefaultForPlatform(plugin),
+        activationSource,
+        autoEnabledReason: autoEnabled.autoEnabledReasons[plugin.id]?.join("; "),
+      }).activated,
+  );
 }
 
 async function promptPluginFields(params: {
