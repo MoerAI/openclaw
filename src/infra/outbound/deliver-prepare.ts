@@ -30,26 +30,17 @@ import type { OutboundPayloadPlan } from "./reply-payload-parts.js";
 import { createReplyToDeliveryPolicy, normalizeOutboundReplyFacts } from "./reply-policy.js";
 
 class OutboundPayloadPreparationError extends Error {
-  readonly sourceIndex: number;
-  readonly payload: ReplyPayload;
-
-  constructor(error: unknown, sourceIndex: number, payload: ReplyPayload) {
+  constructor(error: unknown) {
     super(error instanceof Error ? error.message : String(error), { cause: error });
     this.name = "OutboundPayloadPreparationError";
-    this.sourceIndex = sourceIndex;
-    this.payload = payload;
   }
 }
 
-function throwIfPreparationAborted(
-  signal: AbortSignal | undefined,
-  sourceIndex: number,
-  payload: ReplyPayload,
-): void {
+function throwIfPreparationAborted(signal: AbortSignal | undefined): void {
   try {
     throwIfAborted(signal);
   } catch (error) {
-    throw new OutboundPayloadPreparationError(error, sourceIndex, payload);
+    throw new OutboundPayloadPreparationError(error);
   }
 }
 
@@ -70,16 +61,13 @@ function compactPreparedPayload(payload: ReplyPayload): ReplyPayload {
     Object.fromEntries(
       Object.entries({
         ...rest,
-        ...(typeof payload.text === "string" ? { text: summary.text } : {}),
-        ...(summary.mediaUrls.length === 1
-          ? { mediaUrl: summary.mediaUrls[0] }
-          : summary.mediaUrls.length > 1
-            ? { mediaUrls: summary.mediaUrls }
-            : {}),
-        ...(replyToId !== undefined ? { replyToId } : {}),
-        ...(replyToTag === true ? { replyToTag: true } : {}),
-        ...(replyToCurrent === true ? { replyToCurrent: true } : {}),
-        ...(audioAsVoice === true ? { audioAsVoice: true } : {}),
+        text: typeof payload.text === "string" ? summary.text : undefined,
+        mediaUrl: summary.mediaUrls.length === 1 ? summary.mediaUrls[0] : undefined,
+        mediaUrls: summary.mediaUrls.length > 1 ? summary.mediaUrls : undefined,
+        replyToId,
+        replyToTag: replyToTag === true ? true : undefined,
+        replyToCurrent: replyToCurrent === true ? true : undefined,
+        audioAsVoice: audioAsVoice === true ? true : undefined,
       }).filter(([, value]) => value !== undefined),
     ) as ReplyPayload,
   );
@@ -162,10 +150,6 @@ async function prepareOutboundPlan(
   let plan =
     structuredPlan ??
     createOutboundPayloadPlan(params.payloads, {
-      cfg: params.cfg,
-      sessionKey: params.session?.policyKey ?? params.session?.key,
-      surface: params.channel,
-      conversationType: params.session?.conversationType,
       extractMarkdownImages: handler.extractMarkdownImages,
     });
   if (structuredPlan && handler.extractMarkdownImages) {
@@ -225,10 +209,10 @@ async function prepareOutboundPlan(
   let modifierBoundaryEntered = false;
 
   payloads: for (const { index: sourceIndex, payload } of normalized) {
-    throwIfPreparationAborted(params.abortSignal, sourceIndex, payload);
+    throwIfPreparationAborted(params.abortSignal);
     if (hasModifyingHooks && !modifierBoundaryEntered) {
       await options?.onBeforeFirstModifier?.();
-      throwIfPreparationAborted(params.abortSignal, sourceIndex, payload);
+      throwIfPreparationAborted(params.abortSignal);
       modifierBoundaryEntered = true;
     }
     const changes = { replyHookChanged: false, messageHookChanged: false };
@@ -240,10 +224,10 @@ async function prepareOutboundPlan(
       } catch (error) {
         // Modifier handlers are fail-open. Only a host invariant failure can
         // escape here, and atomic preparation must attribute it before aborting.
-        throw new OutboundPayloadPreparationError(error, sourceIndex, postHookPayload);
+        throw new OutboundPayloadPreparationError(error);
       }
       postHookPayload = copyMetadata(postHookPayload, result.payload);
-      throwIfPreparationAborted(params.abortSignal, sourceIndex, postHookPayload);
+      throwIfPreparationAborted(params.abortSignal);
       if (result.cancelled) {
         entries.push({
           sourceIndex,

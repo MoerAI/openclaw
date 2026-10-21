@@ -314,10 +314,9 @@ function nonSandboxToolPoliciesBlockMcp(params: {
   return (
     profileToolPolicyBlocksMcp(profilePolicy, params.serverNames) ||
     profileToolPolicyBlocksMcp(providerProfilePolicy, params.serverNames) ||
-    nonSandboxToolPolicyBlocksMcp(globalTools, params.serverNames) ||
-    nonSandboxToolPolicyBlocksMcp(globalProviderPolicy, params.serverNames) ||
-    nonSandboxToolPolicyBlocksMcp(agentTools, params.serverNames) ||
-    nonSandboxToolPolicyBlocksMcp(agentProviderPolicy, params.serverNames)
+    [globalTools, globalProviderPolicy, agentTools, agentProviderPolicy].some((policy) =>
+      nonSandboxToolPolicyBlocksMcp(policy, params.serverNames),
+    )
   );
 }
 
@@ -339,13 +338,10 @@ function collectSandboxMcpAllowlistWarnings(cfg: OpenClawConfig): string[] {
   const sandboxPolicies = collectActiveSandboxToolPolicies(cfg, serverNames);
   const issueSources = sandboxPolicies
     .filter(
-      ({ policy }) =>
+      ({ policy, nonSandboxToolPolicyBlocksMcp: blocked }) =>
         !toolPolicyAllowsMcpServers(policy, serverNames, "every") &&
-        !toolPolicyDeniesAllMcpServers(policy, serverNames),
-    )
-    .filter(
-      ({ nonSandboxToolPolicyBlocksMcp: nonSandboxToolPolicyBlocksMcpLocal }) =>
-        !nonSandboxToolPolicyBlocksMcpLocal,
+        !toolPolicyDeniesAllMcpServers(policy, serverNames) &&
+        !blocked,
     )
     .flatMap(({ labels }) => labels);
   if (issueSources.length === 0) {
@@ -371,7 +367,6 @@ function addIssue(issues: Map<string, Set<string>>, key: string, sourceLabel: st
 export function collectPluginToolAllowlistWarnings(params: {
   cfg: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
-  manifestRegistry?: PluginManifestRegistry;
 }): string[] {
   if (params.cfg.plugins?.enabled === false) {
     return [];
@@ -408,12 +403,10 @@ export function collectPluginToolAllowlistWarnings(params: {
     return warnings;
   }
 
-  const registry =
-    params.manifestRegistry ??
-    loadManifestMetadataSnapshot({
-      config: params.cfg,
-      env: params.env ?? process.env,
-    }).manifestRegistry;
+  const registry = loadManifestMetadataSnapshot({
+    config: params.cfg,
+    env: params.env ?? process.env,
+  }).manifestRegistry;
   const knownPluginIds = new Set(registry.plugins.map((plugin) => normalizePluginId(plugin.id)));
   const toolOwners = collectToolOwners(registry);
   const missingPluginIssues = new Map<string, Set<string>>();

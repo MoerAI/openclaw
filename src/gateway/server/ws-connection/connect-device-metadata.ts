@@ -29,11 +29,9 @@ export function resolvePairedAccessScopes(
   return normalizeSortedUniqueTrimmedStringList(scopes);
 }
 
-function isSetupCodeMobileBootstrapClient(client: {
-  id?: string;
-  platform?: string;
-  deviceFamily?: string;
-}): boolean {
+function isSetupCodeMobileBootstrapClient(
+  client: Parameters<typeof isSetupCodeHandoffBootstrapClient>[0]["client"],
+): boolean {
   const platform = normalizeDeviceMetadataForAuth(client.platform);
   const deviceFamily = normalizeDeviceMetadataForAuth(client.deviceFamily);
   if (client.id === GATEWAY_CLIENT_IDS.ANDROID_APP) {
@@ -45,11 +43,9 @@ function isSetupCodeMobileBootstrapClient(client: {
   return false;
 }
 
-function isSetupCodeVoiceNodeBootstrapClient(client: {
-  id?: string;
-  platform?: string;
-  deviceFamily?: string;
-}): boolean {
+function isSetupCodeVoiceNodeBootstrapClient(
+  client: Parameters<typeof isSetupCodeHandoffBootstrapClient>[0]["client"],
+): boolean {
   const platform = normalizeDeviceMetadataForAuth(client.platform);
   const deviceFamily = normalizeDeviceMetadataForAuth(client.deviceFamily);
   return (
@@ -139,50 +135,31 @@ export function isMobileNodeBootstrapConnect(params: {
   );
 }
 
-function pairedDeviceAllowsBootstrapRole(params: {
-  device: PairedDevice;
-  profile: DeviceBootstrapProfile;
-  role: string;
-}): boolean {
-  return (
-    hasEffectivePairedDeviceRole(params.device, params.role) &&
-    roleScopesAllow({
-      role: params.role,
-      requestedScopes: resolveBootstrapProfileScopesForRole(
-        params.role,
-        params.profile.scopes,
-        params.profile.purpose,
-      ),
-      allowedScopes: resolvePairedAccessScopes(params.device),
-    })
-  );
-}
-
-export function pairedDeviceAllowsBootstrapProfile(params: {
-  device: PairedDevice | null | undefined;
-  devicePublicKey: string;
-  profile: DeviceBootstrapProfile;
-}): boolean {
+export function pairedDeviceAllowsBootstrapProfile(
+  params: {
+    device: PairedDevice | null | undefined;
+    devicePublicKey: string;
+    profile: DeviceBootstrapProfile;
+  },
+  roles: readonly string[] = params.profile.roles,
+): boolean {
   const device = params.device;
   return Boolean(
     device &&
     device.publicKey === params.devicePublicKey &&
-    params.profile.roles.every((role) =>
-      pairedDeviceAllowsBootstrapRole({ device, profile: params.profile, role }),
+    roles.every(
+      (role) =>
+        hasEffectivePairedDeviceRole(device, role) &&
+        roleScopesAllow({
+          role,
+          requestedScopes: resolveBootstrapProfileScopesForRole(
+            role,
+            params.profile.scopes,
+            params.profile.purpose,
+          ),
+          allowedScopes: resolvePairedAccessScopes(device),
+        }),
     ),
-  );
-}
-
-export function pairedDeviceAllowsBootstrapOperator(params: {
-  device: PairedDevice | null | undefined;
-  devicePublicKey: string;
-  profile: DeviceBootstrapProfile;
-}): boolean {
-  const device = params.device;
-  return Boolean(
-    device &&
-    device.publicKey === params.devicePublicKey &&
-    pairedDeviceAllowsBootstrapRole({ device, profile: params.profile, role: "operator" }),
   );
 }
 

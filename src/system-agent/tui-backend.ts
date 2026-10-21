@@ -26,6 +26,7 @@ import {
   SystemAgentInferenceUnavailableError,
   isSystemAgentInferenceUnavailableError,
 } from "./inference-error.js";
+import { requireSystemAgentPersistentApplyInference } from "./inference-guard.js";
 import { buildOnboardingWelcome } from "./onboarding-welcome.js";
 import { loadOverviewForOperation } from "./operations-execution-helpers.js";
 import { executeSystemAgentOperation, type SystemAgentOperation } from "./operations.js";
@@ -373,27 +374,15 @@ async function runSetupHandoff(
     return;
   }
   const beforePersistentEffect = async () => {
-    const binding = opts?.verifiedInference;
-    if (!binding) {
-      throw new SystemAgentInferenceUnavailableError("conversation");
-    }
-    try {
-      const { resolvePersistentApplyInference } = await import("./setup-inference.js");
-      const route = await resolvePersistentApplyInference({
-        binding,
-        runtime,
-        deps: opts.deps,
-      });
-      if (route) {
-        return;
-      }
-    } catch (error) {
-      if (isSystemAgentInferenceUnavailableError(error)) {
-        throw error;
-      }
-      throw new SystemAgentInferenceUnavailableError("conversation", [error], "route-changed");
-    }
-    throw new SystemAgentInferenceUnavailableError("conversation", [], "route-changed");
+    await requireSystemAgentPersistentApplyInference(
+      { binding: opts?.verifiedInference, runtime },
+      (failures) => {
+        if (isSystemAgentInferenceUnavailableError(failures[0])) {
+          throw failures[0];
+        }
+        throw new SystemAgentInferenceUnavailableError("conversation", failures, "route-changed");
+      },
+    );
   };
   if (handoff.target === "gateway" || handoff.target === "search") {
     const run =
@@ -505,7 +494,7 @@ async function requireTuiVerifiedInference(opts: SystemAgentTuiOptions) {
     throw new SystemAgentInferenceUnavailableError("conversation");
   }
   try {
-    const verified = await resolveSystemAgentVerifiedInferenceState(binding, opts.deps);
+    const verified = await resolveSystemAgentVerifiedInferenceState(binding);
     if (verified) {
       const { config, route } = verified;
       const [{ getPreparedModelCatalogSnapshot }, { resolveThinkingDefault }] = await Promise.all([

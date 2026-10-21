@@ -7,12 +7,14 @@ import type {
 } from "openclaw/plugin-sdk/diagnostic-runtime";
 import { asPositiveFiniteNumber } from "openclaw/plugin-sdk/number-runtime";
 import { redactSensitiveText } from "openclaw/plugin-sdk/security-runtime";
+import { redactOtelAttributes } from "./service-attributes.js";
 import {
   addUpstreamRequestIdSpanEvent,
   assignGenAiModelCallAttrs,
   assignModelCallPromptStatsAttrs,
   assignPositiveNumberAttr,
   assignModelCallUsageAttrs,
+  assignModelResponseUsageAttrs,
   genAiOperationName,
   modelCallSpanName,
 } from "./service-genai-attributes.js";
@@ -22,16 +24,36 @@ import type { ModelCallLifecycleDiagnosticEvent } from "./service-types.js";
 
 export function createModelRecorders(runtime: DiagnosticsRecorderRuntime) {
   return {
+    recordModelResponseObserved(
+      evt: Extract<DiagnosticEventPayload, { type: "model.response.observed" }>,
+      metadata: DiagnosticEventMetadata,
+    ) {
+      if (!runtime.tracesEnabled || !metadata.trusted) {
+        return;
+      }
+      const span = runtime.getTrackedInternalOrTrustedSpan(evt, metadata);
+      if (!span) {
+        return;
+      }
+      const attrs: Record<string, string | number | boolean> = {
+        "openclaw.upstreamRequestIdHash": evt.upstreamRequestIdHash,
+        "openclaw.model_response.timestamp_source": evt.timestampSource,
+        "openclaw.model_response.usage_source": evt.usageSource,
+        "openclaw.model_response.usage_scope": evt.usageScope,
+      };
+      assignModelResponseUsageAttrs(attrs, evt);
+      // A response receipt is an event on its turn, not a timed provider request.
+      span.addEvent("openclaw.model.response.observed", redactOtelAttributes(attrs), evt.ts);
+    },
     recordModelCallStarted(
       evt: Extract<DiagnosticEventPayload, { type: "model.call.started" }>,
       metadata: DiagnosticEventMetadata,
     ) {
       if (!runtime.tracesEnabled || !metadata.trusted) {
-        return undefined;
+        return;
       }
-      const trackedSpan = runtime.getTrackedInternalOrTrustedSpan(evt, metadata);
-      if (trackedSpan) {
-        return trackedSpan.spanContext();
+      if (runtime.getTrackedInternalOrTrustedSpan(evt, metadata)) {
+        return;
       }
       const spanAttrs: Record<string, string | number | boolean> = {
         "openclaw.provider": evt.provider,
@@ -46,17 +68,15 @@ export function createModelRecorders(runtime: DiagnosticsRecorderRuntime) {
         spanAttrs["openclaw.transport"] = evt.transport;
       }
       assignModelCallPromptStatsAttrs(spanAttrs, evt);
-      return runtime
-        .trackTrustedSpan(
-          evt,
-          metadata,
-          runtime.spanWithDuration(modelCallSpanName(evt), spanAttrs, undefined, {
-            kind: SpanKind.CLIENT,
-            parentContext: runtime.activeTrustedParentContext(evt, metadata),
-            startTimeMs: evt.ts,
-          }),
-        )
-        .spanContext();
+      runtime.trackInternalOrTrustedSpan(
+        evt,
+        metadata,
+        runtime.spanWithDuration(modelCallSpanName(evt), spanAttrs, undefined, {
+          kind: SpanKind.CLIENT,
+          parentContext: runtime.activeTrustedParentContext(evt, metadata),
+          startTimeMs: evt.ts,
+        }),
+      );
     },
     recordModelCallFinished(
       evt: ModelCallLifecycleDiagnosticEvent,
@@ -79,17 +99,15 @@ export function createModelRecorders(runtime: DiagnosticsRecorderRuntime) {
           : {}),
       };
       runtime.modelCallDurationHistogram.record(evt.durationMs, metricAttrs);
-      const requestPayloadBytes = asPositiveFiniteNumber(evt.requestPayloadBytes);
-      if (requestPayloadBytes !== undefined) {
-        runtime.modelCallRequestBytesHistogram.record(requestPayloadBytes, metricAttrs);
-      }
-      const responseStreamBytes = asPositiveFiniteNumber(evt.responseStreamBytes);
-      if (responseStreamBytes !== undefined) {
-        runtime.modelCallResponseBytesHistogram.record(responseStreamBytes, metricAttrs);
-      }
-      const timeToFirstByteMs = asPositiveFiniteNumber(evt.timeToFirstByteMs);
-      if (timeToFirstByteMs !== undefined) {
-        runtime.modelCallTimeToFirstByteHistogram.record(timeToFirstByteMs, metricAttrs);
+      for (const [histogram, value] of [
+        [runtime.modelCallRequestBytesHistogram, evt.requestPayloadBytes],
+        [runtime.modelCallResponseBytesHistogram, evt.responseStreamBytes],
+        [runtime.modelCallTimeToFirstByteHistogram, evt.timeToFirstByteMs],
+      ] as const) {
+        const normalized = asPositiveFiniteNumber(value);
+        if (normalized !== undefined) {
+          histogram.record(normalized, metricAttrs);
+        }
       }
       runtime.genAiOperationDurationHistogram.record(evt.durationMs / 1000, {
         "gen_ai.operation.name": genAiOperationName(evt.api, evt.observationUnit),

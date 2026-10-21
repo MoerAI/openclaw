@@ -4,21 +4,13 @@ import type { Command } from "commander";
 import { CHAT_HISTORY_MAX_ENTRIES } from "../../packages/gateway-protocol/src/schema/chat-history-constants.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { defaultRuntime } from "../runtime.js";
+import type { TuiOptions } from "../tui/tui-types.js";
 import { formatDocsHelp } from "./help-format.js";
 import { parseTimeoutMs } from "./parse-timeout.js";
 import { resolveSessionTarget } from "./session-target.js";
 import { addTuiOptions } from "./tui-cli-options.js";
 
-type TuiCliOptions = {
-  local?: boolean;
-  url?: string;
-  token?: string;
-  password?: string;
-  tlsFingerprint?: string;
-  session?: string;
-  deliver?: boolean;
-  thinking?: string;
-  message?: string;
+type TuiCliOptions = Omit<TuiOptions, "timeoutMs" | "historyLimit" | "initialMessageTimeoutMs"> & {
   timeoutMs?: string;
   historyLimit?: string;
 };
@@ -69,18 +61,10 @@ export async function runTuiCliAction(
       })
     : undefined;
   const { runTui } = await import("../tui/tui.js");
+  const { url, token, password, tlsFingerprint } = resolved?.gateway ?? {};
   await runTui({
     local: isLocal,
-    ...(resolved?.gateway.url
-      ? {
-          boundGateway: {
-            url: resolved.gateway.url,
-            token: resolved.gateway.token,
-            password: resolved.gateway.password,
-            tlsFingerprint: resolved.gateway.tlsFingerprint,
-          },
-        }
-      : gateway),
+    ...(url ? { boundGateway: { url, token, password, tlsFingerprint } } : gateway),
     session: resolved?.sessionKey ?? opts.session,
     ...(resolved ? { agentId: resolved.agentId } : {}),
     deliver: Boolean(opts.deliver),
@@ -88,7 +72,6 @@ export async function runTuiCliAction(
     message: opts.message,
     timeoutMs,
     historyLimit,
-    forceProcessExitOnReturn: true,
   });
 }
 

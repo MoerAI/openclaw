@@ -12,7 +12,7 @@ import { raceWithTimeoutAndAbort, waitForAbortableDelay } from "./async.js";
 import { createFeishuClient } from "./client.js";
 import {
   encodeQuery,
-  extractReplyText,
+  extractFeishuApiErrorMeta,
   parseCommentContentElements,
   type FeishuDriveCommentCard,
   type FeishuDriveCommentReply,
@@ -20,7 +20,6 @@ import {
   type ParsedCommentLinkedDocument,
 } from "./comment-shared.js";
 import { normalizeCommentFileType, type CommentFileType } from "./comment-target.js";
-import type { ResolvedFeishuAccount } from "./types.js";
 
 const FEISHU_COMMENT_VERIFY_TIMEOUT_MS = 3_000;
 const FEISHU_COMMENT_PAGE_SIZE = 100;
@@ -57,10 +56,7 @@ type ResolveDriveCommentEventParams = {
   cfg: ClawdbotConfig;
   accountId: string;
   event: FeishuDriveCommentNoticeEvent;
-  account?: ResolvedFeishuAccount;
   botOpenId?: string;
-  createClient?: (account: ResolvedFeishuAccount) => FeishuRequestClient;
-  verificationTimeoutMs?: number;
   logger?: (message: string) => void;
   abortSignal?: AbortSignal;
 };
@@ -108,16 +104,13 @@ type ResolvedWholeCommentTimelineEntry = {
   content: ParsedCommentContent;
 };
 
-function truncatePromptText(
-  text: string | undefined,
-  maxLength = FEISHU_PROMPT_TEXT_LIMIT,
-): string {
+function truncatePromptText(text: string | undefined): string {
   const normalized = normalizeString(text);
   if (!normalized) {
     return "";
   }
-  return normalized.length > maxLength
-    ? `${sliceUtf16Safe(normalized, 0, maxLength - 1)}…`
+  return normalized.length > FEISHU_PROMPT_TEXT_LIMIT
+    ? `${sliceUtf16Safe(normalized, 0, FEISHU_PROMPT_TEXT_LIMIT - 1)}…`
     : normalized;
 }
 
@@ -177,15 +170,6 @@ function formatLinkedDocumentsInlineSummary(
         `${link.resolvedObjType ?? link.urlKind}:${link.resolvedObjToken ?? link.wikiNodeToken ?? "UNKNOWN"}`,
     )
     .join(",");
-}
-
-function summarizeCommentRepliesForLog(replies: FeishuDriveCommentReply[]): string {
-  return JSON.stringify(
-    replies.map((reply) => ({
-      reply_id: reply.reply_id,
-      text_len: extractReplyText(reply)?.length ?? 0,
-    })),
-  );
 }
 
 type CommentContentContext = {
@@ -287,72 +271,54 @@ type DriveCommentPageRequest = {
   accountId: string;
 };
 
-function fetchDriveComments(params: DriveCommentPageRequest & { isWholeOnly?: boolean }) {
-  const errorLabel = `feishu[${params.accountId}]: failed to list drive comments for ${params.fileToken}`;
-  return fetchDriveCommentPages({
-    logger: params.logger,
-    errorLabel,
-    fetchPage: (pageToken) =>
-      requestFeishuOpenApi<FeishuDriveCommentPage<FeishuDriveCommentCard>>({
-        client: params.client,
-        method: "GET",
-        url:
-          `/open-apis/drive/v1/files/${encodeURIComponent(params.fileToken)}/comments` +
-          encodeQuery({
-            file_type: params.fileType,
-            is_whole: params.isWholeOnly === true ? "true" : undefined,
-            page_size: String(FEISHU_COMMENT_PAGE_SIZE),
-            page_token: pageToken,
-            user_id_type: "open_id",
-          }),
-        timeoutMs: params.timeoutMs,
-        logger: params.logger,
-        errorLabel,
-      }),
-  });
-}
+type DriveCommentPageTarget = { kind: "whole-comments" } | { kind: "replies"; commentId: string };
 
-function fetchDriveCommentReplies(params: DriveCommentPageRequest & { commentId: string }) {
-  const errorLabel = `feishu[${params.accountId}]: failed to fetch comment replies for ${params.commentId}`;
-  return fetchDriveCommentPages({
-    logger: params.logger,
-    errorLabel,
-    fetchPage: (pageToken) =>
-      requestFeishuOpenApi<FeishuDriveCommentPage<FeishuDriveCommentReply>>({
-        client: params.client,
-        method: "GET",
-        url:
-          `/open-apis/drive/v1/files/${encodeURIComponent(params.fileToken)}/comments/${encodeURIComponent(params.commentId)}/replies` +
-          encodeQuery({
-            file_type: params.fileType,
-            page_token: pageToken,
-            page_size: String(FEISHU_COMMENT_PAGE_SIZE),
-            user_id_type: "open_id",
-          }),
-        timeoutMs: params.timeoutMs,
-        logger: params.logger,
-        errorLabel,
-      }),
-  });
-}
+type DriveCommentPageItem = {
+  "whole-comments": FeishuDriveCommentCard;
+  replies: FeishuDriveCommentReply;
+};
 
-async function fetchDriveCommentPages<T>(params: {
-  fetchPage: (pageToken?: string) => Promise<FeishuDriveCommentPage<T> | null>;
-  logger?: (message: string) => void;
-  errorLabel: string;
-}): Promise<{ items: T[]; logIds: string[] }> {
-  const items: T[] = [];
-  const logIds: string[] = [];
+async function fetchDriveCommentPages<T extends DriveCommentPageTarget>(
+  params: DriveCommentPageRequest & T,
+): Promise<DriveCommentPageItem[T["kind"]][]> {
+  const errorLabel =
+    params.kind === "whole-comments"
+      ? `feishu[${params.accountId}]: failed to list drive comments for ${params.fileToken}`
+      : `feishu[${params.accountId}]: failed to fetch comment replies for ${params.commentId}`;
+  const items: DriveCommentPageItem[T["kind"]][] = [];
   let pageToken: string | undefined;
   for (let page = 0; page < FEISHU_COMMENT_PAGE_LIMIT; page += 1) {
-    const response = await params.fetchPage(pageToken);
-    if (response?.log_id?.trim()) {
-      logIds.push(response.log_id.trim());
-    }
+    const commentsUrl = `/open-apis/drive/v1/files/${encodeURIComponent(params.fileToken)}/comments`;
+    const url =
+      params.kind === "whole-comments"
+        ? commentsUrl
+        : `${commentsUrl}/${encodeURIComponent(params.commentId)}/replies`;
+    const query = {
+      file_type: params.fileType,
+      ...(params.kind === "whole-comments"
+        ? {
+            is_whole: "true",
+            page_size: String(FEISHU_COMMENT_PAGE_SIZE),
+            page_token: pageToken,
+          }
+        : {
+            page_token: pageToken,
+            page_size: String(FEISHU_COMMENT_PAGE_SIZE),
+          }),
+      user_id_type: "open_id",
+    };
+    const response = await requestFeishuOpenApi<
+      FeishuDriveCommentPage<DriveCommentPageItem[T["kind"]]>
+    >({
+      ...params,
+      method: "GET",
+      url: url + encodeQuery(query),
+      errorLabel,
+    });
     if (response?.code !== 0) {
       if (response) {
         params.logger?.(
-          `${params.errorLabel}: ${response.msg ?? "unknown error"} log_id=${response.log_id?.trim() || "unknown"}`,
+          `${errorLabel}: ${response.msg ?? "unknown error"} log_id=${response.log_id?.trim() || "unknown"}`,
         );
       }
       break;
@@ -363,7 +329,7 @@ async function fetchDriveCommentPages<T>(params: {
     }
     pageToken = response.data.page_token.trim();
   }
-  return { items, logIds };
+  return items;
 }
 
 async function requestFeishuOpenApi<T>(params: {
@@ -379,20 +345,17 @@ async function requestFeishuOpenApi<T>(params: {
     if (!isRecord(error)) {
       return typeof error === "string" ? error : JSON.stringify(error);
     }
-    const response = isRecord(error.response) ? error.response : undefined;
-    const responseData = isRecord(response?.data) ? response?.data : undefined;
-    const details = {
-      message: typeof error.message === "string" ? error.message : JSON.stringify(error),
-      code: readString(error.code),
-      method: readString(isRecord(error.config) ? error.config.method : undefined),
-      url: readString(isRecord(error.config) ? error.config.url : undefined),
-      http_status: typeof response?.status === "number" ? response.status : undefined,
-      feishu_code:
-        typeof responseData?.code === "number" ? responseData.code : readString(responseData?.code),
-      feishu_msg: readString(responseData?.msg),
-      feishu_log_id: readString(responseData?.log_id),
-    };
-    return JSON.stringify(details);
+    const meta = extractFeishuApiErrorMeta(error);
+    return JSON.stringify({
+      message: meta.message,
+      code: meta.code,
+      method: readString(meta.config?.method),
+      url: readString(meta.config?.url),
+      http_status: meta.httpStatus,
+      feishu_code: meta.feishuCode,
+      feishu_msg: meta.feishuMsg,
+      feishu_log_id: meta.feishuLogId,
+    });
   };
 
   const result = await raceWithTimeoutAndAbort(
@@ -589,10 +552,6 @@ async function fetchDriveCommentContext(
         )
       : undefined;
   const embeddedReplies = commentCard?.reply_list?.replies ?? [];
-  params.logger?.(
-    `feishu[${params.accountId}]: embedded comment replies comment=${params.commentId} ` +
-      `count=${embeddedReplies.length} summary=${summarizeCommentRepliesForLog(embeddedReplies)}`,
-  );
   const embeddedTargetReply = params.replyId
     ? embeddedReplies.find((reply) => reply.reply_id?.trim() === params.replyId)
     : embeddedReplies.at(-1);
@@ -601,22 +560,9 @@ async function fetchDriveCommentContext(
   let fetchedMatchedReply = params.replyId ? embeddedTargetReply : undefined;
   const needsExtraReplies = !embeddedTargetReply || commentCard?.has_more === true;
   if (needsExtraReplies) {
-    params.logger?.(
-      `feishu[${params.accountId}]: fetching extra comment replies comment=${params.commentId} ` +
-        `requested_reply=${params.replyId ?? "none"} ` +
-        `embedded_count=${embeddedReplies.length} ` +
-        `embedded_hit=${embeddedTargetReply ? "yes" : "no"} ` +
-        `embedded_has_more=${commentCard?.has_more === true ? "yes" : "no"}`,
-    );
-    const fetched = await fetchDriveCommentReplies(params);
-    if (fetched.items.length > 0) {
-      params.logger?.(
-        `feishu[${params.accountId}]: fetched extra comment replies comment=${params.commentId} ` +
-          `count=${fetched.items.length} ` +
-          `log_ids=${JSON.stringify(fetched.logIds)} ` +
-          `summary=${summarizeCommentRepliesForLog(fetched.items)}`,
-      );
-      replies = fetched.items;
+    const fetched = await fetchDriveCommentPages({ ...params, kind: "replies" });
+    if (fetched.length > 0) {
+      replies = fetched;
       fetchedMatchedReply = params.replyId
         ? replies.find((reply) => reply.reply_id?.trim() === params.replyId)
         : undefined;
@@ -638,15 +584,9 @@ async function fetchDriveCommentContext(
         if (!delayElapsed) {
           break;
         }
-        const retried = await fetchDriveCommentReplies(params);
-        if (retried.items.length > 0) {
-          params.logger?.(
-            `feishu[${params.accountId}]: fetched retried comment replies comment=${params.commentId} ` +
-              `attempt=${attempt} count=${retried.items.length} ` +
-              `log_ids=${JSON.stringify(retried.logIds)} ` +
-              `summary=${summarizeCommentRepliesForLog(retried.items)}`,
-          );
-          replies = retried.items;
+        const retried = await fetchDriveCommentPages({ ...params, kind: "replies" });
+        if (retried.length > 0) {
+          replies = retried;
         }
         fetchedMatchedReply = replies.find((reply) => reply.reply_id?.trim() === params.replyId);
         if (fetchedMatchedReply) {
@@ -660,23 +600,6 @@ async function fetchDriveCommentContext(
   const targetReply = params.replyId
     ? (embeddedTargetReply ?? fetchedMatchedReply)
     : (replies.at(-1) ?? embeddedTargetReply ?? rootReply);
-  const matchSource = params.replyId
-    ? embeddedTargetReply
-      ? "embedded"
-      : fetchedMatchedReply
-        ? "fetched"
-        : "miss"
-    : targetReply === rootReply
-      ? "fallback_root"
-      : targetReply === embeddedTargetReply
-        ? "embedded_latest"
-        : "fetched_latest";
-  params.logger?.(
-    `feishu[${params.accountId}]: comment reply resolution comment=${params.commentId} ` +
-      `requested_reply=${params.replyId ?? "none"} match_source=${matchSource} ` +
-      `root=${JSON.stringify({ reply_id: rootReply?.reply_id, text_len: extractReplyText(rootReply)?.length ?? 0 })} ` +
-      `target=${JSON.stringify({ reply_id: targetReply?.reply_id, text_len: extractReplyText(targetReply)?.length ?? 0 })}`,
-  );
   const meta = metaResponse?.code === 0 ? metaResponse.data?.metas?.[0] : undefined;
   const currentDocument = {
     fileType: params.fileType,
@@ -720,11 +643,11 @@ async function fetchDriveCommentContext(
 
   let wholeCommentTimeline: ResolvedWholeCommentTimelineEntry[] = [];
   if (commentCard?.is_whole === true) {
-    const allComments = await fetchDriveComments({
+    const allComments = await fetchDriveCommentPages({
       ...params,
-      isWholeOnly: true,
+      kind: "whole-comments",
     });
-    const wholeComments = allComments.items.filter((comment) => comment.is_whole === true);
+    const wholeComments = allComments.filter((comment) => comment.is_whole === true);
     wholeCommentTimeline = await Promise.all(
       wholeComments.map(async (comment) => {
         const rootWholeReply = comment.reply_list?.replies?.[0];
@@ -767,7 +690,6 @@ async function fetchDriveCommentContext(
     rootCommentText: rootReplyContext?.content.semanticText ?? rootReplyContext?.content.plainText,
     targetReplyText:
       targetReplyContext?.content.semanticText ?? targetReplyContext?.content.plainText,
-    rootCommentContent: rootReplyContext?.content,
     targetReplyContent: targetReplyContext?.content,
     currentCommentThreadReplies: resolvedReplies,
     wholeCommentTimeline,
@@ -966,17 +888,7 @@ function buildDriveCommentSurfacePrompt(
 }
 
 export async function resolveDriveCommentEventTurn(params: ResolveDriveCommentEventParams) {
-  const {
-    cfg,
-    accountId,
-    event,
-    account,
-    botOpenId,
-    createClient,
-    verificationTimeoutMs = FEISHU_COMMENT_VERIFY_TIMEOUT_MS,
-    logger,
-    abortSignal,
-  } = params;
+  const { cfg, accountId, event, botOpenId, logger, abortSignal } = params;
   const eventId = event.event_id?.trim();
   const commentId = event.comment_id?.trim();
   const replyId = event.reply_id?.trim();
@@ -1016,9 +928,9 @@ export async function resolveDriveCommentEventTurn(params: ResolveDriveCommentEv
     return null;
   }
 
-  const client = createClient
-    ? createClient(account ?? ({ accountId } as ResolvedFeishuAccount))
-    : createFeishuClient((await import("./accounts.js")).resolveFeishuAccount({ cfg, accountId }));
+  const client = createFeishuClient(
+    (await import("./accounts.js")).resolveFeishuAccount({ cfg, accountId }),
+  );
   const context = await fetchDriveCommentContext({
     client,
     fileToken,
@@ -1026,7 +938,7 @@ export async function resolveDriveCommentEventTurn(params: ResolveDriveCommentEv
     commentId,
     replyId,
     botOpenIds: [effectiveBotOpenId, event.notice_meta?.to_user_id?.open_id],
-    timeoutMs: verificationTimeoutMs,
+    timeoutMs: FEISHU_COMMENT_VERIFY_TIMEOUT_MS,
     logger,
     accountId,
     abortSignal,

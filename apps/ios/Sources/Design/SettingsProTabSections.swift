@@ -209,12 +209,13 @@ extension SettingsProTab {
         if showScanHero {
             scanAction = { self.openGatewayQRScanner() }
         }
+        let gateway = self.gatewayStatusPresentation
         return self.detailStatusCard(
             icon: "antenna.radiowaves.left.and.right",
             title: "Gateway",
-            detail: .verbatim(self.gatewayStatusDetail),
-            value: .verbatim(self.gatewayStatusValue),
-            color: self.gatewayStatusColor,
+            detail: .verbatim(gateway.detail),
+            value: .verbatim(gateway.value),
+            color: gateway.color,
             actionTitle: showScanHero ? "Scan QR to Pair" : nil,
             actionSystemImage: "qrcode.viewfinder",
             action: scanAction)
@@ -871,24 +872,9 @@ extension SettingsProTab {
             TextField("Port", text: self.manualPortBinding)
                 .font(OpenClawType.body)
                 .keyboardType(.numberPad)
-            Picker(selection: self.manualGatewayTLSBinding) {
-                Text("Unencrypted")
-                    .font(OpenClawType.captionSemiBold)
-                    .tag(false)
-                Text("Secure (TLS)")
-                    .font(OpenClawType.captionSemiBold)
-                    .tag(true)
-            } label: {
-                Text("Connection security")
-                    .font(OpenClawType.captionSemiBold)
-            }
-            .pickerStyle(.segmented)
-            .disabled(self.manualGatewayTransport.requiresTLS)
-            if let helperText = self.manualGatewayTransport.helperText {
-                Text(helperText)
-                    .font(OpenClawType.footnote)
-                    .foregroundStyle(.secondary)
-            }
+            ManualGatewaySecurityRows(
+                presentation: self.manualGatewayTransport,
+                useTLS: self.manualGatewayTLSBinding)
             self.gatewayActionButton(
                 title: "Connect Manual",
                 icon: "network",

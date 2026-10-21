@@ -40,7 +40,7 @@ type AccountCatalogCredential =
   | { source: "profile"; credential: AuthProfileCredential }
   | { source: "direct"; provider: string; credential: ReturnType<typeof readDirectBinding> };
 type AccountCatalogObservation = AccountCatalogCredential & {
-  result?: Promise<readonly ProviderCatalogOutcome[]>;
+  pending?: { refresh: boolean; promise: Promise<AccountCatalogObservation> };
   outcomes?: readonly ProviderCatalogOutcome[];
   serviceTierObservations?: readonly (ModelServiceTierObservation & { expiresAt: number })[];
 };
@@ -122,7 +122,7 @@ export function createPreparedAccountCatalogAccess(
     return account;
   };
   const createAccount = (identityKey: string, credential: AccountCatalogCredential) => {
-    const account: AccountCatalogObservation = structuredClone(credential);
+    const account: AccountCatalogObservation = { ...credential };
     accounts.set(identityKey, account);
     for (const key of accounts.keys()) {
       if (accounts.size <= 64) {
@@ -261,54 +261,68 @@ export function createPreparedAccountCatalogAccess(
           "Selected account catalog changed",
         );
       }
-      if (params.allowDiscovery && params.refresh) {
-        deleteAccount(`profile:${params.profileId}`);
-      }
       const identityKey = `profile:${params.profileId}`;
       let observation = readAccount(identityKey, params.credential);
       if (!observation) {
         if (!params.allowDiscovery) {
-          return { outcomes: [], isCurrent: ownerIsCurrent };
+          return { outcomes: [], isCurrent: () => ownerIsCurrent() && !accounts.has(identityKey) };
         }
         observation = createAccount(identityKey, {
           source: "profile",
           credential: params.credential,
         });
       }
-      // A response observation does not mean this account's catalog was discovered.
-      if (params.allowDiscovery && !observation.result) {
-        observation.result = Promise.resolve().then(params.load);
-      }
-      // Startup/read-only projections never join an in-flight remote acquisition.
-      const result = observation.result;
-      if (!result || (!params.allowDiscovery && !observation.outcomes)) {
-        return { outcomes: [], isCurrent: ownerIsCurrent };
-      }
-      const captured = observation;
-      const current = () =>
-        ownerIsCurrent() && accounts.get(`profile:${params.profileId}`) === captured;
-      let outcomes: readonly ProviderCatalogOutcome[];
-      try {
-        outcomes = captured.outcomes ?? (await result);
-      } catch (error) {
-        // A revoked request cannot poison a later authorized selection of this account.
-        if (current()) {
-          if (captured.serviceTierObservations?.length) {
-            // Catalog failure cannot erase a recent response observed on the API route.
-            captured.result = undefined;
-          } else {
-            deleteAccount(`profile:${params.profileId}`);
-          }
+      const current = (account: AccountCatalogObservation) =>
+        ownerIsCurrent() && accounts.get(identityKey) === account;
+      const assertCurrent = (account: AccountCatalogObservation) => {
+        if (!current(account)) {
+          throw new PreparedModelRuntimePublicationSupersededError(
+            "Selected account catalog changed",
+          );
         }
-        throw error;
+      };
+      const needsDiscovery = params.allowDiscovery && (params.refresh || !observation.outcomes);
+      if (needsDiscovery && !observation.pending) {
+        const captured = observation;
+        const pending: NonNullable<AccountCatalogObservation["pending"]> = {
+          refresh: false,
+          promise: Promise.resolve()
+            .then(async () => {
+              assertCurrent(captured);
+              const outcomes = await params.load();
+              assertCurrent(captured);
+              captured.pending = undefined;
+              // Refresh retires old projections and response hints only after discovery succeeds.
+              const published = pending.refresh
+                ? createAccount(identityKey, { source: "profile", credential: params.credential })
+                : captured;
+              published.outcomes = outcomes;
+              if (pending.refresh && captured.serviceTierObservations?.length) {
+                scheduleExpiry();
+                onChanged?.();
+              }
+              return published;
+            })
+            .finally(() => {
+              if (captured.pending === pending) {
+                captured.pending = undefined;
+              }
+            }),
+        };
+        captured.pending = pending;
       }
-      if (!current()) {
-        throw new PreparedModelRuntimePublicationSupersededError(
-          "Selected account catalog changed",
-        );
+      // Warm reads consume the last publication; only cold discovery and explicit refresh wait.
+      if (needsDiscovery) {
+        observation.pending!.refresh ||= params.refresh === true;
+        observation = await observation.pending!.promise;
       }
-      captured.outcomes = outcomes;
-      return { outcomes, isCurrent: current };
+      const published = observation;
+      assertCurrent(published);
+      const outcomes = published.outcomes;
+      return {
+        outcomes: outcomes ?? [],
+        isCurrent: () => current(published) && published.outcomes === outcomes,
+      };
     },
   };
 }
@@ -478,14 +492,14 @@ export function createNativeLoginRecheck(
   },
   eligibleProviders: readonly string[],
   publish: (auth: PreparedModelCatalogAuth) => void,
-): () => void {
+): (options?: { force?: boolean }) => void | Promise<void> {
   const { owners, index } = owner.pluginGeneration.pluginMetadataSnapshot;
   const refs = new Set(listManifestSyntheticAuthProviderRefs(index).map(owner.normalizeProvider));
   const providerIds = eligibleProviders.filter(
     (provider) => owners.cliBackends.has(provider) && refs.has(provider),
   );
   let checkedAt = Date.now();
-  let pending = false;
+  let pending: Promise<void> | undefined;
   const recheck = async () => {
     owner.assertCurrent();
     await using _ = {
@@ -532,17 +546,20 @@ export function createNativeLoginRecheck(
       },
     );
   };
-  return () => {
+  return (options) => {
     const now = Date.now();
-    if (pending || !providerIds.length || now - checkedAt < NATIVE_LOGIN_RECHECK_MS) {
-      return;
+    if (pending) {
+      return pending;
+    }
+    if (!providerIds.length || (!options?.force && now - checkedAt < NATIVE_LOGIN_RECHECK_MS)) {
+      return undefined;
     }
     checkedAt = now;
-    pending = true;
-    void recheck()
+    pending = recheck()
       .catch(() => undefined)
       .finally(() => {
-        pending = false;
+        pending = undefined;
       });
+    return pending;
   };
 }

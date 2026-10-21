@@ -1,6 +1,4 @@
 /**
- * Fast context lookup for realtime voice consults.
- *
  * When memory/session search can answer quickly, Talk can return concise
  * context without launching a full agent consult; otherwise callers may fall
  * back to the normal consult flow.
@@ -9,8 +7,8 @@ import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coerc
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { withTimeout } from "../infra/fs-safe.js";
 import type { MemoryCallerContext, MemorySearchHit } from "../plugins/memory-provider-types.js";
-import { withTimeout } from "../utils/with-timeout.js";
 import type { RealtimeVoiceAgentConsultResult } from "./agent-consult-runtime.js";
 import { parseRealtimeVoiceAgentConsultArgs } from "./agent-consult-tool.js";
 
@@ -18,7 +16,6 @@ type Logger = {
   debug?: (message: string) => void;
 };
 
-/** Fast-context lookup policy for realtime voice consult shortcuts. */
 export type RealtimeVoiceFastContextConfig = {
   enabled: boolean;
   /** Maximum memory/session hits to include in the spoken-context prompt. */
@@ -31,13 +28,11 @@ export type RealtimeVoiceFastContextConfig = {
   fallbackToConsult: boolean;
 };
 
-/** Human labels used in generated fast-context responses. */
 export type RealtimeVoiceFastContextLabels = {
   audienceLabel: string;
   contextName: string;
 };
 
-/** One context entry as the caller hears it: its corpus, location, and text. */
 type FastContextHit = { source: string; location: string; snippet: string };
 
 type FastContextLookupResult =
@@ -191,7 +186,6 @@ async function lookupFastContext(params: {
   };
 }
 
-/** Try to answer a realtime consult from fast memory/session context. */
 export async function resolveRealtimeVoiceFastContextConsult(params: {
   cfg: OpenClawConfig;
   agentId: string;

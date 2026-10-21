@@ -3,15 +3,50 @@ import type {
   SessionEntryPlaceholder,
   SessionSharingEntry,
 } from "./session-accessor.sqlite-entry-cache.types.js";
-import type { SessionEntry } from "./types.js";
+import {
+  attachSessionEntrySnapshots,
+  sessionEntrySnapshotColumnsDefinition,
+  type SessionEntryProjection,
+} from "./session-entry-snapshot-values.js";
+import type { InternalSessionEntry as SessionEntry } from "./types.js";
 
 export type PreparedSessionEntryPredicate = {
   entry: SessionEntry | undefined;
   matches: (entry: SessionEntry | undefined) => boolean;
-  state: "current" | "unknown" | "changed";
+  state: "acquiring" | "current" | "unknown" | "changed";
   revision: number;
   pending: Set<object>;
+  projection?: SessionEntryProjection;
 };
+
+/** Missing optional full facts cannot certify a predicate that selected snapshots. */
+export function projectSessionEntryPredicatePostimage(
+  predicate: PreparedSessionEntryPredicate,
+  entry: SessionEntry | undefined,
+  fullEntry?: SessionEntry,
+): { entry: SessionEntry | undefined; known: boolean } {
+  const projection = predicate.projection;
+  if (!entry || projection === undefined) {
+    return { entry, known: true };
+  }
+  const snapshots = projection === "full" || (projection !== "list" && projection.length > 0);
+  const selected = snapshots ? fullEntry : entry;
+  if (!selected) {
+    return { entry: undefined, known: false };
+  }
+  const needsProjection =
+    projection !== "full" &&
+    sessionEntrySnapshotColumnsDefinition.some(
+      ([field]) =>
+        Object.hasOwn(selected, field) && (projection === "list" || !projection.includes(field)),
+    );
+  return {
+    entry: needsProjection
+      ? attachSessionEntrySnapshots({ ...selected }, {}, projection)
+      : selected,
+    known: true,
+  };
+}
 
 export type CommittedSessionSharingFacts = {
   entry: SessionSharingEntry | undefined;
@@ -33,7 +68,13 @@ export type PreparedSessionSharingRead = {
   acquisition?: SessionSharingAcquisition;
   generation?: {
     initiallyAbsent?: true;
-    current: Pick<SessionSharingEntry, "sessionId" | "lifecycleRevision"> | null | undefined;
+    current:
+      | Pick<
+          SessionSharingEntry,
+          "sessionId" | "lifecycleRevision" | "permissionMode" | "toolOverrides"
+        >
+      | null
+      | undefined;
   };
 };
 
@@ -51,6 +92,7 @@ export function publishRetainedSessionEntryPredicate(
   read: PreparedSessionSharingRead,
   entry: SessionEntry | undefined,
   known: boolean,
+  options?: { preserveMatchingEntry?: boolean; fullEntry?: SessionEntry },
 ): void {
   const predicate = read.predicate;
   if (!predicate) {
@@ -59,14 +101,32 @@ export function publishRetainedSessionEntryPredicate(
   if (predicate.state === "changed") {
     return;
   }
-  if (!known) {
+  const postimage = projectSessionEntryPredicatePostimage(predicate, entry, options?.fullEntry);
+  const postimageKnown = known && postimage.known;
+  // Seed acquisition with the first committed fact. Later facts must agree before
+  // the selecting read can acknowledge them, including superseded receipts.
+  if (predicate.state === "acquiring" && predicate.revision === 0) {
+    predicate.entry = postimage.entry;
+    predicate.revision += 1;
+    if (!postimageKnown) {
+      predicate.state = "unknown";
+    }
+    return;
+  }
+  let matches: boolean | undefined;
+  try {
+    matches = postimageKnown ? predicate.matches(postimage.entry) : undefined;
+  } catch {
+    // A failed comparison fences this claim without stranding the committed batch.
+  }
+  if (matches === undefined) {
     predicate.revision += 1;
     predicate.state = "unknown";
-  } else if (!predicate.matches(entry)) {
+  } else if (!matches) {
     predicate.revision += 1;
     predicate.state = "changed";
-  } else {
-    predicate.entry = entry;
+  } else if (!options?.preserveMatchingEntry) {
+    predicate.entry = postimage.entry;
   }
 }
 
@@ -79,7 +139,7 @@ export function revokePreparedSessionEntryPredicate(read: PreparedSessionSharing
 
 /** Partial publications change only their named fields, independently of row-cache warmth. */
 export function projectSessionEntryPredicateChange(
-  predicate: PreparedSessionEntryPredicate,
+  predicate: Pick<PreparedSessionEntryPredicate, "entry">,
   change: SessionRowFacts,
 ): SessionEntry | undefined {
   const entry = predicate.entry;
@@ -93,9 +153,11 @@ export function projectSessionEntryPredicateChange(
         ? { ...entry, owner: change.owner }
         : undefined;
     case "participants":
-      return change.projection
-        ? { ...entry, participants: undefined, participantCount: undefined, ...change.projection }
-        : undefined;
+      return change.projectionChanged === false
+        ? entry
+        : change.projection
+          ? { ...entry, participants: undefined, participantCount: undefined, ...change.projection }
+          : undefined;
     case "category":
       return entry.sessionId === change.sessionId
         ? { ...entry, category: change.category ?? undefined }
@@ -131,6 +193,9 @@ export function publishRetainedSessionGeneration(
     generation.current.lifecycleRevision !== entry.lifecycleRevision
   ) {
     generation.current = null;
+  } else {
+    // Same-generation policy changes must narrow retained execution before its next effect.
+    generation.current = entry;
   }
 }
 
@@ -197,7 +262,7 @@ export function recordAcquiringSessionMember(
 /** Apply a committed field postimage only to its original session generation. */
 export function updateSessionSharingField(
   facts: CommittedSessionSharingFacts,
-  change: Extract<SessionRowFacts, { kind: "member" | "owner" }>,
+  change: Extract<SessionRowFacts, { kind: "member" | "owner" | "category" }>,
 ): CommittedSessionSharingFacts {
   if (facts.entry?.sessionId !== change.sessionId) {
     return facts;
@@ -206,6 +271,9 @@ export function updateSessionSharingField(
     return (facts.entry.lifecycleRevision ?? null) === change.lifecycleRevision
       ? { ...facts, entry: { ...facts.entry, owner: change.owner } }
       : facts;
+  }
+  if (change.kind === "category") {
+    return { ...facts, entry: { ...facts.entry, category: change.category ?? undefined } };
   }
   const membership = new Set(facts.membership);
   if (change.present) {

@@ -21,28 +21,18 @@ export function formatBrowserWebSocketConstructorError(err: unknown, url: string
     message.includes("mixed content") ||
     message.includes("insecure websocket");
   const isPlaintextWs = url.trim().toLowerCase().startsWith("ws://");
-  const details = {
-    code: securityError
-      ? BROWSER_WEBSOCKET_SECURITY_ERROR_CODE
-      : BROWSER_WEBSOCKET_CONSTRUCTOR_ERROR_CODE,
-    browserErrorName,
-    browserMessage,
-  };
-  if (securityError) {
-    return {
-      code: BROWSER_WEBSOCKET_SECURITY_ERROR_CODE,
-      message:
-        "Browser refused the Gateway WebSocket for security reasons." +
+  const code = securityError
+    ? BROWSER_WEBSOCKET_SECURITY_ERROR_CODE
+    : BROWSER_WEBSOCKET_CONSTRUCTOR_ERROR_CODE;
+  return {
+    code,
+    message: securityError
+      ? "Browser refused the Gateway WebSocket for security reasons." +
         (isPlaintextWs
           ? " Use wss:// when the Control UI is served over HTTPS/Tailscale Serve, or open the loopback dashboard at http://127.0.0.1:18789."
-          : " Check the Gateway WebSocket URL and browser security policy."),
-      details,
-    };
-  }
-  return {
-    code: BROWSER_WEBSOCKET_CONSTRUCTOR_ERROR_CODE,
-    message: `Could not create the Gateway WebSocket: ${browserMessage}`,
-    details,
+          : " Check the Gateway WebSocket URL and browser security policy.")
+      : `Could not create the Gateway WebSocket: ${browserMessage}`,
+    details: { code, browserErrorName, browserMessage },
   };
 }
 
@@ -86,6 +76,8 @@ export function createBrowserGatewaySocket(
   maxPayloadBytes?: () => number | undefined,
 ): GatewayProtocolSocket {
   const socket = new WebSocket(gatewayWebSocketTransportUrl(url));
+  const listeners = new AbortController();
+  const listenerOptions = { signal: listeners.signal };
   let opening = true;
   let openingTimeoutReason: string | undefined;
   let openingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -97,22 +89,40 @@ export function createBrowserGatewaySocket(
     }
   };
 
-  socket.addEventListener("open", () => {
-    finishOpening();
-    handlers.open();
-  });
-  socket.addEventListener("message", (event) => handlers.message(String(event.data ?? "")));
-  socket.addEventListener("close", (event) => {
-    finishOpening();
-    // Browsers erase locally initiated close reasons before the handshake finishes.
-    handlers.close(event.code, event.reason || openingTimeoutReason || "");
-  });
-  socket.addEventListener("error", () => {
-    finishOpening();
-    if (!openingTimeoutReason) {
-      handlers.error(new Error("websocket error"));
-    }
-  });
+  socket.addEventListener(
+    "open",
+    () => {
+      finishOpening();
+      handlers.open();
+    },
+    listenerOptions,
+  );
+  socket.addEventListener(
+    "message",
+    (event) => handlers.message(String(event.data ?? "")),
+    listenerOptions,
+  );
+  socket.addEventListener(
+    "close",
+    (event) => {
+      finishOpening();
+      // The protocol owner can reconnect synchronously from this terminal callback.
+      listeners.abort();
+      // Browsers erase locally initiated close reasons before the handshake finishes.
+      handlers.close(event.code, event.reason || openingTimeoutReason || "");
+    },
+    listenerOptions,
+  );
+  socket.addEventListener(
+    "error",
+    () => {
+      finishOpening();
+      if (!openingTimeoutReason) {
+        handlers.error(new Error("websocket error"));
+      }
+    },
+    listenerOptions,
+  );
 
   // The protocol challenge timer starts after `open`. Bound the browser's
   // opening phase to the same default preauth budget used by the Node client.

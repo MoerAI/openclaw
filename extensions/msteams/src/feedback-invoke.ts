@@ -1,11 +1,12 @@
 import { recordChannelFeedbackEvent } from "openclaw/plugin-sdk/channel-inbound";
-import { resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolveMSTeamsAccountConfig } from "./accounts.js";
 import { formatUnknownError } from "./errors.js";
 import { runFeedbackReflection } from "./feedback-reflection.js";
 import { extractMSTeamsConversationMessageId, normalizeMSTeamsConversationId } from "./inbound.js";
 import { isMSTeamsInvokeAuthorized } from "./monitor-handler.js";
 import type { MSTeamsMessageHandlerDeps } from "./monitor-handler.types.js";
+import { resolveMSTeamsRouteSessionKey } from "./monitor-handler/thread-session.js";
 import { getMSTeamsRuntime } from "./runtime.js";
 import type { MSTeamsTurnContext } from "./sdk-types.js";
 
@@ -37,7 +38,8 @@ export async function runMSTeamsFeedbackInvokeHandler(
     return false;
   }
 
-  const msteamsCfg = deps.cfg.channels?.msteams;
+  const cfg = deps.readConfig?.() ?? deps.cfg;
+  const msteamsCfg = resolveMSTeamsAccountConfig(cfg, deps.accountId);
   if (msteamsCfg?.feedbackEnabled === false) {
     deps.log.debug?.("feedback handling disabled");
     return true;
@@ -70,25 +72,21 @@ export async function runMSTeamsFeedbackInvokeHandler(
 
   const core = getMSTeamsRuntime();
   const route = core.channel.routing.resolveAgentRoute({
-    cfg: deps.cfg,
+    cfg,
     channel: "msteams",
+    accountId: deps.accountId,
     peer: {
       kind: isDirectMessage ? "direct" : isChannel ? "channel" : "group",
       id: isDirectMessage ? senderId : conversationId,
     },
   });
 
-  const feedbackThreadId = isChannel
-    ? (extractMSTeamsConversationMessageId(rawConversationId) ?? activity.replyToId ?? undefined)
-    : undefined;
-  if (feedbackThreadId) {
-    const threadKeys = resolveThreadSessionKeys({
-      baseSessionKey: route.sessionKey,
-      threadId: feedbackThreadId,
-      parentSessionKey: route.sessionKey,
-    });
-    route.sessionKey = threadKeys.sessionKey;
-  }
+  route.sessionKey = resolveMSTeamsRouteSessionKey({
+    baseSessionKey: route.sessionKey,
+    isChannel,
+    conversationMessageId: extractMSTeamsConversationMessageId(rawConversationId),
+    replyToId: activity.replyToId,
+  });
 
   const feedbackEvent = {
     type: "custom",
@@ -111,7 +109,7 @@ export async function runMSTeamsFeedbackInvokeHandler(
 
   try {
     await recordChannelFeedbackEvent({
-      cfg: deps.cfg,
+      cfg,
       agentId: route.agentId,
       sessionKey: route.sessionKey,
       event: feedbackEvent,
@@ -144,8 +142,9 @@ export async function runMSTeamsFeedbackInvokeHandler(
   if (isNegative && msteamsCfg?.feedbackReflection !== false) {
     // Sent text is not cached; reflection uses the session history and optional user comment.
     runFeedbackReflection({
-      cfg: deps.cfg,
+      cfg,
       app: deps.app,
+      accountId: deps.accountId,
       conversationRef,
       sessionKey: route.sessionKey,
       agentId: route.agentId,

@@ -58,7 +58,11 @@ import { reserveLineGroupHistory } from "./group-history.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
 import { hasAnyLineMention, isLineBotMentioned } from "./mentions.js";
 import { quotesLineBotMessage } from "./outbound-message-log.js";
-import { parseLineQuestionPostbackData, resolveLineQuestionPostback } from "./question-postback.js";
+import {
+  isLineQuestionPostbackData,
+  parseLineQuestionPostbackData,
+  resolveLineQuestionPostback,
+} from "./question-postback.js";
 import { getLineRuntime } from "./runtime.js";
 import { getLineGroupName, getUserDisplayName, pushMessageLine, replyMessageLine } from "./send.js";
 import type { ResolvedLineAccount } from "./types.js";
@@ -524,7 +528,7 @@ async function handleMessageEvent(
 
     const messageContext = await buildLineMessageContext({
       event: answerAs,
-      allMedia: [...allMedia],
+      allMedia,
       mediaUnavailable,
       ...(context.missingParts === undefined ? {} : { missingParts: context.missingParts }),
       cfg,
@@ -536,9 +540,7 @@ async function handleMessageEvent(
       mentions: decision.mentions,
       buildContext: context.buildContext,
     });
-    if (!messageContext) {
-      logVerbose("line: skipping empty message");
-    } else {
+    if (messageContext) {
       await processMessage(messageContext, {
         // The config this event resolved to, not the one the monitor booted on.
         cfg: context.cfg,
@@ -605,7 +607,6 @@ async function handlePostbackEvent(
   context: LineHandlerContext,
 ): Promise<void> {
   const data = event.postback.data;
-  logVerbose(`line: received postback: ${data}`);
 
   const decision = await resolveLineEventAdmission(event, context);
   if (!decision) {
@@ -639,6 +640,11 @@ async function handlePostbackEvent(
       text: lineQuestionOutcomeNotice(outcome.status),
       authorize,
     });
+    return;
+  }
+
+  // A malformed question callback must not fall through as an ordinary user message.
+  if (isLineQuestionPostbackData(data ?? "")) {
     return;
   }
 
@@ -679,7 +685,7 @@ function orderedLineSetMessages(
  * event is the turn's own and the rest are the set parts behind it.
  */
 export async function handleLineWebhookEvents(
-  events: WebhookEvent[],
+  events: readonly WebhookEvent[],
   context: LineHandlerContext,
 ): Promise<void> {
   const [event, ...setParts] = events;
@@ -696,11 +702,8 @@ export async function handleLineWebhookEvents(
         );
         break;
       case "follow":
-      case "unfollow": {
-        const { userId } = getLineSourceInfo(event.source);
-        logVerbose(`line: user ${userId ?? "unknown"} ${event.type}ed`);
+      case "unfollow":
         break;
-      }
       case "join":
         await handleJoinEvent(event, context);
         break;
