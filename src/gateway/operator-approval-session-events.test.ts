@@ -436,7 +436,8 @@ describe("operator approval session events", () => {
     // Use the physical writer independently of the approval API's logical FIFO.
     const writing = stateWorkerStore.runOpenClawStateWorkerOperation(
       writerContext,
-      (scope) => scope.execute({ type: "operatorApprovals.expire", input: { nowMs: 5_000 } }),
+      (scope) =>
+        scope.execute({ type: "operatorApprovals.prepareReplay", input: { nowMs: 5_000 } }),
       {
         createAdmission: createSqliteWorkerWriteAdmission(writerContext.admission.assertCurrent, [
           writerContext.admission.databasePath,
@@ -575,7 +576,7 @@ describe("operator approval session events", () => {
     }
   });
 
-  it("invalidates a pending replay when a terminal event precedes the worker reply", async () => {
+  it("invalidates pending replay when a decision precedes the worker reply", async () => {
     const databaseOptions = createDatabaseOptions();
     const pending = await insertPendingApproval({
       databaseOptions,
@@ -859,6 +860,7 @@ describe("operator approval session events", () => {
     const record = manager.create(
       {
         command: "printf replay-expiry",
+        streamProposal: { jobId: "stream-attention", name: "Log watcher", operation: "add" },
         sessionKey: SOURCE_SESSION_KEY,
         sessionId: "approval-owner-session",
         runId: "approval-owner-run",

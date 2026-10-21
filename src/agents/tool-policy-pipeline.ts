@@ -4,6 +4,7 @@
  * expanded only after unknown core/plugin entries are classified.
  */
 import { isFrozenClawToolAllowPolicy } from "../claws/tool-policy-runtime.js";
+import { rememberBoundedKey } from "../infra/dedupe.js";
 import type { AnyAgentTool } from "./agent-tools.types.js";
 import { CORE_TOOL_GROUPS, isKnownCoreToolId } from "./tool-catalog.js";
 import { auditToolPolicyFilter } from "./tool-policy-audit.js";
@@ -35,27 +36,12 @@ export type ConfiguredToolPolicySources = Partial<
   >
 >;
 
-function rememberToolPolicyWarning(warning: string): boolean {
-  if (seenToolPolicyWarnings.has(warning)) {
-    return false;
-  }
-  if (seenToolPolicyWarnings.size >= MAX_TOOL_POLICY_WARNING_CACHE) {
-    const oldest = seenToolPolicyWarnings.values().next().value;
-    if (oldest) {
-      seenToolPolicyWarnings.delete(oldest);
-    }
-  }
-  seenToolPolicyWarnings.add(warning);
-  return true;
-}
-
 // Built-in groups stay core entries even when the inspected subset lacks every
 // member, such as the bundle-tool pass that runs after core tools are validated.
 function isKnownCoreToolPolicyEntry(entry: string): boolean {
   return isKnownCoreToolId(entry) || Object.hasOwn(CORE_TOOL_GROUPS, entry);
 }
 
-/** One named policy layer in the effective runtime tool policy pipeline. */
 export type ToolPolicyPipelineStep = {
   policy: ToolPolicyLike | undefined;
   label: string;
@@ -199,7 +185,7 @@ export function applyToolPolicyPipeline<TTool extends { name: string }>(params: 
             unavailableCoreToolReason: step.unavailableCoreToolReason,
           });
           const warning = `tools: ${step.label} allowlist contains unknown entries (${entries}). ${suffix}`;
-          if (rememberToolPolicyWarning(warning)) {
+          if (rememberBoundedKey(seenToolPolicyWarnings, warning, MAX_TOOL_POLICY_WARNING_CACHE)) {
             params.warn(warning);
           }
         }

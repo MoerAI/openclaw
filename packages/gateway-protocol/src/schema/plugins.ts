@@ -24,8 +24,12 @@ import {
   PluginInstallTrustSchema,
   PluginOperatorGrantsSchema,
 } from "./plugin-inspection.js";
+import { PluginJsonValueSchema } from "./plugin-json-value.js";
+import { PluginRuntimeRetentionSchema } from "./plugin-retention.js";
 import { NonEmptyString } from "./primitives.js";
 import { stringLiteralUnion } from "./string-literal-union.js";
+
+export { PluginJsonValueSchema } from "./plugin-json-value.js";
 
 export {
   PLUGIN_UI_CAPABILITIES,
@@ -61,8 +65,6 @@ export {
  * These payloads let the gateway expose plugin-provided UI actions without
  * baking plugin-specific payload shapes into the core protocol.
  */
-/** Arbitrary plugin-owned JSON payload carried opaquely through the gateway. */
-export const PluginJsonValueSchema = Type.Unknown();
 
 export const PluginControlUiDescriptorSchema = closedObject({
   id: NonEmptyString,
@@ -565,6 +567,8 @@ export const PluginsInspectResultSchema = closedObject({
       }),
     ),
   ),
+  /** Live cross-session acquisition facts; emitted only for current administrators. */
+  runtimeRetention: Type.Optional(Type.Union([PluginRuntimeRetentionSchema, Type.Null()])),
   decisions: Type.Optional(Type.Array(PluginDecisionProviderStatusSchema)),
   plugin: closedObject({
     id: NonEmptyString,

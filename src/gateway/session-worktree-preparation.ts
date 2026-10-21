@@ -51,7 +51,7 @@ import type {
   PrepareGatewaySessionLifecycle,
   PreparedGatewaySessionLifecycle,
 } from "./session-create-service.types.js";
-import { invalidSessionRequest } from "./session-request-error.js";
+import { invalidSessionRequest, nonGitWorktreeSourceMessage } from "./session-request-error.js";
 import { captureSessionMutationRouting } from "./session-sharing-preparation.js";
 import { resolveExplicitSessionName } from "./session-title-state.js";
 import { withGatewaySessionEntryReadOnly } from "./session-utils-read-lifetime.js";
@@ -343,7 +343,8 @@ export async function prepareSessionWorktree(params: {
 }): ReturnType<PrepareGatewaySessionLifecycle> {
   const { target, commitGuard } = params;
   const context = captureWorktreeRunEndContext(process.env);
-  const worktrees = new ManagedWorktreeService({ env: { ...process.env, ...context.environment } });
+  const env = { ...process.env, ...context.environment };
+  const worktrees = new ManagedWorktreeService({ env, getConfig: () => params.cfg });
   const sandboxRequired =
     target.sandboxRequired === true ||
     target.entry?.sandbox === "required" ||
@@ -417,8 +418,7 @@ export async function prepareSessionWorktree(params: {
         target.projectId ??
         target.entry?.projectId ??
         (params.acceptedSource?.kind === "project" ? params.acceptedSource.id : undefined);
-      const pendingSource = selectSessionWorktreeProjectSource(projectId, params.signal);
-      const selected = pendingSource ? await pendingSource : undefined;
+      const selected = await selectSessionWorktreeProjectSource(projectId, params.signal);
       if (selected) {
         const expectedRoot = fs.realpathSync(workspace);
         withSource = async (run) =>
@@ -632,7 +632,7 @@ export async function prepareSessionWorktreeCreation(params: {
   signal?: AbortSignal;
   commitGuard: () => void;
   onTitleError: (error: unknown) => void;
-  onTitlePersisted: () => void;
+  onTitleStateChanged: () => void;
 }): ReturnType<PrepareGatewaySessionLifecycle> {
   const { cfg, target: lifecycleTarget, signal, commitGuard, name, baseRef } = params;
   commitGuard();
@@ -682,7 +682,7 @@ export async function prepareSessionWorktreeCreation(params: {
   }
   // Git discovery permits subdirectory workspaces with an ancestor .git entry.
   if (typeof workspace === "string" && !params.projectGitUrl && !insideGitCheckout(workspace)) {
-    return invalidSessionRequest("agent workspace is not a git checkout");
+    return invalidSessionRequest(nonGitWorktreeSourceMessage(params.workspace));
   }
   // Reuse validates the binding, not a selected ref that may have since disappeared.
   const resolvedBase =
@@ -740,7 +740,7 @@ export async function prepareSessionWorktreeCreation(params: {
           commitGuard,
           withSource,
           onError: params.onTitleError,
-          onPersisted: params.onTitlePersisted,
+          onTitleStateChanged: params.onTitleStateChanged,
         })
       : undefined;
   const prepared = await prepareSessionWorktree({
