@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import { GatewayRequestError, type GatewayBrowserClient } from "../../api/gateway.ts";
 import * as json5Runtime from "../json5-runtime.ts";
+import { configRawForDisplay } from "./config-draft-model.ts";
 import {
   CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS,
   createGatewayHarness,
@@ -13,6 +14,56 @@ import {
 import { createRuntimeConfigCapability } from "./runtime-config-capability.ts";
 
 describe("config draft model", () => {
+  it("keeps scalar form edits off the full-document clone and serialization path", async () => {
+    vi.useFakeTimers();
+    const config = {
+      gateway: { port: 18789 },
+      models: {
+        providers: {
+          fixture: {
+            baseUrl: "https://models.example.invalid/v1",
+            api: "openai-completions",
+            models: Array.from({ length: 25_000 }, (_, index) => ({
+              id: `fixture-${index}`,
+              name: `Fixture ${index}`,
+            })),
+          },
+        },
+      },
+    };
+    const { request } = createConfigServerMock();
+    await request("config.apply", { raw: JSON.stringify(config), baseHash: "hash-1" });
+    const { runtimeConfig } = createConfigCapabilityHarness(request);
+    await runtimeConfig.ensureLoaded();
+    expect(runtimeConfig.state.configForm).toEqual(config);
+    const savedConfig = runtimeConfig.state.configSnapshot?.config;
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    try {
+      for (const port of [18790, 18791, 18789]) {
+        clone.mockClear();
+        stringify.mockClear();
+        runtimeConfig.patchForm(["gateway", "port"], port);
+        expect({
+          fullDocumentClones: clone.mock.calls.filter(
+            ([value]) => value !== null && typeof value === "object" && "models" in value,
+          ).length,
+          fullDocumentSerializations: stringify.mock.calls.filter(
+            ([value]) => value !== null && typeof value === "object" && "models" in value,
+          ).length,
+        }).toEqual({ fullDocumentClones: 0, fullDocumentSerializations: 0 });
+        expect(runtimeConfig.state.configForm?.gateway).toEqual({ port });
+        expect(runtimeConfig.state.configFormDirty).toBe(port !== 18789);
+        expect(savedConfig?.gateway).toEqual({ port: 18789 });
+        expect(JSON.parse(configRawForDisplay(runtimeConfig.state)).gateway).toEqual({ port });
+      }
+    } finally {
+      runtimeConfig.dispose();
+      vi.restoreAllMocks();
+    }
+  });
+
   it.each([
     { edit: "delete", dispose: false, unavailable: false },
     { edit: "revert", dispose: true, unavailable: true },
