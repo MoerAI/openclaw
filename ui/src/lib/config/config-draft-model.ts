@@ -441,7 +441,8 @@ function setConfigRawOriginal(state: RuntimeConfigState, raw: string) {
 function mutateConfigForm(
   state: RuntimeConfigState,
   mutate: (draft: Record<string, unknown>) => void,
-  patch?: { path: Array<string | number>; value: unknown },
+  path?: Array<string | number>,
+  value?: unknown,
 ) {
   let base: Record<string, unknown>;
   if (state.configFormDirty && state.configFormMode === "raw") {
@@ -463,10 +464,10 @@ function mutateConfigForm(
   } else {
     // Saved receipts and clean drafts share a tree; this is the mutation boundary.
     const current = state.configForm ?? resolveEditableSnapshotConfig(state.configSnapshot) ?? {};
-    base = patch ? current : structuredClone(current);
+    base = path ? current : structuredClone(current);
   }
-  if (patch) {
-    const next = copyWithPathPatch(base, patch.path, patch.value, "copy-set");
+  if (path) {
+    const next = copyWithPathPatch(base, path, value, "copy-set");
     if (!next.ok || !isRecord(next.value)) {
       return;
     }
@@ -549,7 +550,8 @@ export function updateConfigFormValue(
       }
       syncEnabledPluginAllowlist(state, draft, path, value);
     },
-    { path, value },
+    path,
+    value,
   );
 }
 

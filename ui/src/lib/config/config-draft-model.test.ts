@@ -17,18 +17,7 @@ describe("config draft model", () => {
   it("keeps scalar form edits bounded before and after autosave replay", async () => {
     vi.useFakeTimers();
     const config = {
-      models: {
-        providers: {
-          fixture: {
-            baseUrl: "https://models.example.invalid/v1",
-            api: "openai-completions",
-            models: Array.from({ length: 25_000 }, (_, index) => ({
-              id: `fixture-${index}`,
-              name: `Fixture ${index}`,
-            })),
-          },
-        },
-      },
+      messages: { usageTemplate: "x".repeat(2_500_000) },
       gateway: { port: 18789 },
     };
     const { request, firstSet } = createDeferredSetServerMock();
@@ -60,10 +49,10 @@ describe("config draft model", () => {
         runtimeConfig.patchForm(["gateway", "port"], port);
         expect({
           fullDocumentClones: clone.mock.calls.filter(
-            ([value]) => value !== null && typeof value === "object" && "models" in value,
+            ([value]) => value !== null && typeof value === "object" && "messages" in value,
           ).length,
           fullDocumentSerializations: stringify.mock.calls.filter(
-            ([value]) => value !== null && typeof value === "object" && "models" in value,
+            ([value]) => value !== null && typeof value === "object" && "messages" in value,
           ).length,
         }).toEqual({ fullDocumentClones: 0, fullDocumentSerializations: 0 });
         expect(runtimeConfig.state.configForm?.gateway).toEqual({ port });
@@ -79,10 +68,10 @@ describe("config draft model", () => {
       firstSet.resolve({});
       await acknowledged.promise;
 
-      const models = runtimeConfig.state.configForm?.models;
+      const messages = runtimeConfig.state.configForm?.messages;
       const keys = vi.spyOn(Object, "keys");
       runtimeConfig.patchForm(["gateway", "port"], 18792);
-      expect(keys.mock.calls.filter(([value]) => value === models)).toHaveLength(0);
+      expect(keys.mock.calls.filter(([value]) => value === messages)).toHaveLength(0);
       keys.mockRestore();
       expect(runtimeConfig.state.configForm?.gateway).toEqual({ port: 18792 });
       await expect(flush).resolves.toBe(true);
