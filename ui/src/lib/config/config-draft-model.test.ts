@@ -14,10 +14,9 @@ import {
 import { createRuntimeConfigCapability } from "./runtime-config-capability.ts";
 
 describe("config draft model", () => {
-  it("keeps scalar form edits off the full-document clone and serialization path", async () => {
+  it("keeps scalar form edits bounded before and after autosave replay", async () => {
     vi.useFakeTimers();
     const config = {
-      gateway: { port: 18789 },
       models: {
         providers: {
           fixture: {
@@ -30,13 +29,27 @@ describe("config draft model", () => {
           },
         },
       },
+      gateway: { port: 18789 },
     };
-    const { request } = createConfigServerMock();
+    const { request, firstSet } = createDeferredSetServerMock();
     await request("config.apply", { raw: JSON.stringify(config), baseHash: "hash-1" });
-    const { runtimeConfig } = createConfigCapabilityHarness(request);
+    const firstWriteStarted = deferred();
+    const { runtimeConfig } = createConfigCapabilityHarness((method, params) => {
+      const response = request(method, params);
+      if (method === "config.set") {
+        firstWriteStarted.resolve();
+      }
+      return response;
+    });
     await runtimeConfig.ensureLoaded();
     expect(runtimeConfig.state.configForm).toEqual(config);
     const savedConfig = runtimeConfig.state.configSnapshot?.config;
+    const acknowledged = deferred();
+    const stop = runtimeConfig.subscribe((state) => {
+      if (state.configDraftBaseHash === "hash-3") {
+        acknowledged.resolve();
+      }
+    });
     const clone = vi.spyOn(globalThis, "structuredClone");
     const stringify = vi.spyOn(JSON, "stringify");
 
@@ -58,7 +71,25 @@ describe("config draft model", () => {
         expect(savedConfig?.gateway).toEqual({ port: 18789 });
         expect(JSON.parse(configRawForDisplay(runtimeConfig.state)).gateway).toEqual({ port });
       }
+
+      runtimeConfig.patchForm(["gateway", "port"], 18790);
+      const flush = runtimeConfig.flushFormChanges();
+      await firstWriteStarted.promise;
+      runtimeConfig.patchForm(["gateway", "port"], 18791);
+      firstSet.resolve({});
+      await acknowledged.promise;
+
+      const models = runtimeConfig.state.configForm?.models;
+      const keys = vi.spyOn(Object, "keys");
+      runtimeConfig.patchForm(["gateway", "port"], 18792);
+      expect(keys.mock.calls.filter(([value]) => value === models)).toHaveLength(0);
+      keys.mockRestore();
+      expect(runtimeConfig.state.configForm?.gateway).toEqual({ port: 18792 });
+      await expect(flush).resolves.toBe(true);
+      expect(runtimeConfig.state.configSnapshot?.config?.gateway).toEqual({ port: 18792 });
+      expect(runtimeConfig.state.configFormDirty).toBe(false);
     } finally {
+      stop();
       runtimeConfig.dispose();
       vi.restoreAllMocks();
     }
