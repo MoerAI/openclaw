@@ -70,6 +70,7 @@ export function deriveGatewaySessionLifecycleProjectionPatch(params: {
 type GatewaySessionLifecycleEventParams = {
   sessionKey: string;
   agentId?: string;
+  clientRunId?: string;
   event: LifecycleEventLike;
   assertCommitAllowed?: () => void;
   expectedWriter?: {
@@ -193,11 +194,10 @@ async function persistPreparedGatewaySessionLifecycleEvent(
           ts: params.event.ts,
           sessionId: params.event.sessionId,
           runId: params.event.runId,
-          clientRunId: params.event.clientRunId,
+          clientRunId: params.clientRunId ?? params.event.clientRunId,
           lifecycleGeneration: params.event.lifecycleGeneration,
           mainSessionRestartRecovery: params.event.mainSessionRestartRecovery,
           controlUiVisible: params.event.controlUiVisible,
-          isHeartbeat: params.event.isHeartbeat,
           contextClaimId: params.event.contextClaimId,
           data: params.event.data,
         },

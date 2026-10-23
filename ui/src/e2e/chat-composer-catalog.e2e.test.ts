@@ -9,6 +9,7 @@ import {
   installMockGateway,
   navigateToControlUiSession,
   type ControlUiMockGateway,
+  type MockGatewayWindow,
 } from "../test-helpers/control-ui-e2e.ts";
 import { revealChatModelOption, selectChatModelOption } from "../test-helpers/select-picker-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
@@ -189,6 +190,7 @@ suite.define(() => {
           const selected = modelOption(composer, "codex/gpt-5.5");
 
           await expectText(trigger, selectedModel.name);
+          await composer.locator("textarea").click();
           await trigger.click();
           await expect.poll(() => selected.getAttribute("aria-selected")).toBe("true");
           await trigger.click();
@@ -238,7 +240,6 @@ suite.define(() => {
               ...buildGatewaySessionSnapshot({
                 sessionRow: running,
                 agentId: "main",
-                includeSession: true,
                 activeRunState: { active: true },
               }),
             });
@@ -253,6 +254,7 @@ suite.define(() => {
           await page.reload();
           await gateway.waitForRequest("chat.startup");
           await expectText(trigger, selectedModel.name);
+          await composer.locator("textarea").click();
           await trigger.click();
           expect(await selected.getAttribute("aria-selected")).toBe("true");
           await trigger.click();
@@ -328,7 +330,6 @@ suite.define(() => {
               ...buildGatewaySessionSnapshot({
                 sessionRow: recovered,
                 agentId: "main",
-                includeSession: true,
                 activeRunState: { active: false, runIds: [] },
               }),
             });
@@ -468,7 +469,7 @@ suite.define(() => {
       await picker.locator("summary").click();
       await gateway.waitForRequest("models.list");
       await expectCount(options, 2);
-      await revealChatModelOption(options.last());
+      await revealChatModelOption(picker, "openai/gpt-5.6-luna");
       await expectVisible(options.last());
       await expectText(options.first(), "GPT-5.6 Sol");
       await expectText(options.first(), "Default");
@@ -506,7 +507,7 @@ suite.define(() => {
       expect(await gateway.getRequests("chat.send")).toHaveLength(0);
 
       await optionalCapture(page)("auth-cold-model-picker", composer);
-      await selectChatModelOption(options.first());
+      await selectChatModelOption(picker, "openai/gpt-5.6-sol", { default: true });
       await expect.poll(() => new URL(page.url()).pathname).toBe("/settings/model-providers");
       expect(new URL(page.url()).searchParams.get("connect")).toBe("1");
     });
@@ -616,7 +617,12 @@ suite.define(() => {
       await expect
         .poll(() => modelOption(activeComposer(), "anthropic/other-model").count())
         .toBe(1);
+      const modelSearch = activeComposer().locator("[data-chat-model-search]");
+      await modelSearch.fill("openai/work-model");
+      await expectVisible(activeComposer().locator("[data-chat-model-search-empty]"));
       await expect.poll(() => modelOption(activeComposer(), "openai/work-model").count()).toBe(0);
+      await modelSearch.clear();
+      await expectVisible(modelOption(activeComposer(), "anthropic/other-model"));
       await gateway.waitForRequest("models.list");
     });
   });
@@ -649,7 +655,7 @@ suite.define(() => {
 
       const composer = page.locator(".agent-chat__input");
       await composer.locator('[data-chat-model-select="true"]').click();
-      await revealChatModelOption(modelOption(composer, "openai/startup-model"));
+      await revealChatModelOption(composer, "openai/startup-model");
       expect(await gateway.getRequests("models.list")).toHaveLength(1);
       await gateway.emitGatewayEvent("chat.metadata.changed", {});
       await expect.poll(async () => (await gateway.getRequests("models.list")).length).toBe(2);
@@ -663,7 +669,7 @@ suite.define(() => {
       await composer.locator('[data-chat-model-select="true"]').click();
 
       await expect.poll(async () => (await gateway.getRequests("models.list")).length).toBe(3);
-      await revealChatModelOption(modelOption(composer, "anthropic/discovered-model"));
+      await revealChatModelOption(composer, "anthropic/discovered-model");
       await expect
         .poll(() => modelOption(composer, "anthropic/discovered-model").isVisible())
         .toBe(true);
@@ -711,11 +717,11 @@ suite.define(() => {
       await expect.poll(() => pickerTrigger.getAttribute("aria-disabled")).toBe("true");
       await gateway.setOnline(true);
       await gateway.waitForRequest("chat.startup", { after: startupCount });
-      await expectCount(modelOption(composer, "openai/gpt-5.6-luna"), 1);
 
       await pickerTrigger.click();
       expect(await gateway.getRequests("models.list")).toHaveLength(2);
-      await revealChatModelOption(modelOption(composer, "openai/gpt-5.6-luna"));
+      await revealChatModelOption(composer, "openai/gpt-5.6-luna");
+      await expectCount(modelOption(composer, "openai/gpt-5.6-luna"), 1);
       await expectVisible(modelOption(composer, "openai/gpt-5.6-luna"));
       await expectCount(composer.locator("[data-chat-model-catalog-state]"), 0);
       await capture("02-routable-model-after-reconnect");
@@ -738,65 +744,85 @@ suite.define(() => {
       await gateway.setMethodResponse("models.list", { models: [existing, firstOpen] });
       await gateway.emitGatewayEvent("chat.metadata.changed", {});
       await trigger.click();
+      await revealChatModelOption(composer, "example/existing");
       await expectCount(modelOption(composer, "example/existing"), 1);
-      await revealChatModelOption(modelOption(composer, "example/first-open"));
+      await revealChatModelOption(composer, "example/first-open");
       await expectVisible(modelOption(composer, "example/first-open"));
       await gateway.setMethodResponse("models.list", { models: [existing, firstOpen, published] });
+      const refreshBaseline = await gateway.deferNext("models.list", {
+        agentId: "main",
+        sessionKey: "agent:main:main",
+      });
+      await gateway.emitGatewayEvent("chat.metadata.changed", {});
+      await gateway.waitForRequest("models.list", { after: refreshBaseline });
       const previousRequestCount = (await gateway.getRequests("models.list")).length;
 
-      const reopened = await picker.evaluate(async (details: HTMLDetailsElement) => {
-        const pane = details.closest<
-          HTMLElement & { requestUpdate(): void; updateComplete: Promise<boolean> }
-        >("openclaw-chat-pane");
-        const summary = details.querySelector<HTMLElement>(":scope > summary");
-        if (!pane || !summary) {
-          throw new Error("Expected the native picker and its chat pane");
-        }
-        if (document.visibilityState !== "visible") {
-          throw new Error("Expected a visible document before native picker activation");
-        }
-        await pane.updateComplete;
-        if (!details.open || !details.isConnected) {
-          throw new Error("Expected the first-open catalog to remain rendered");
-        }
-        const listeners = new Set<() => void>();
-        const nextToggle = () =>
-          new Promise<void>((resolve) => {
-            const listener = () => {
-              listeners.delete(listener);
-              resolve();
-            };
-            listeners.add(listener);
-            details.addEventListener("toggle", listener, { once: true });
-          });
-        try {
-          const closed = nextToggle();
-          summary.click();
-          if (details.open) {
-            throw new Error("Expected native close activation to close the picker");
+      const reopened = await picker.evaluate(
+        async (details: HTMLDetailsElement, models) => {
+          const pane = details.closest<HTMLElement & { updateComplete: Promise<boolean> }>(
+            "openclaw-chat-pane",
+          );
+          const summary = details.querySelector<HTMLElement>(":scope > summary");
+          if (!pane || !summary) {
+            throw new Error("Expected the native picker and its chat pane");
           }
-          await closed;
-          const opened = nextToggle();
-          summary.click();
-          if (!details.open) {
-            throw new Error("Expected native reopen activation to open the picker");
+          // SAFETY: installMockGateway installs this typed browser fixture before navigation.
+          const mockGateway = (window as MockGatewayWindow).openclawControlUiE2eGateway;
+          if (!mockGateway) {
+            throw new Error("Expected the mock Gateway publication owner");
           }
-          // A normal render must not overwrite a newer native open before its queued toggle.
-          pane.requestUpdate();
+          if (document.visibilityState !== "visible") {
+            throw new Error("Expected a visible document before native picker activation");
+          }
           await pane.updateComplete;
-          await opened;
-          return { open: details.open, connected: details.isConnected };
-        } finally {
-          for (const listener of listeners) {
-            details.removeEventListener("toggle", listener);
+          if (!details.open || !details.isConnected) {
+            throw new Error("Expected the first-open catalog to remain rendered");
           }
-        }
-      });
+          const listeners = new Set<() => void>();
+          const nextToggle = () =>
+            new Promise<void>((resolve) => {
+              const listener = () => {
+                listeners.delete(listener);
+                resolve();
+              };
+              listeners.add(listener);
+              details.addEventListener("toggle", listener, { once: true });
+            });
+          try {
+            const closed = nextToggle();
+            summary.click();
+            if (details.open) {
+              throw new Error("Expected native close activation to close the picker");
+            }
+            await closed;
+            const opened = nextToggle();
+            summary.click();
+            if (!details.open) {
+              throw new Error("Expected native reopen activation to open the picker");
+            }
+            // A catalog publication must preserve native open before its queued toggle publishes.
+            mockGateway.resolveDeferred(
+              "models.list",
+              { models },
+              { match: { agentId: "main", sessionKey: "agent:main:main" } },
+            );
+            await pane.updateComplete;
+            await opened;
+            return { open: details.open, connected: details.isConnected };
+          } finally {
+            for (const listener of listeners) {
+              details.removeEventListener("toggle", listener);
+            }
+          }
+        },
+        [existing, { ...firstOpen, name: "First open republished" }],
+      );
 
       expect(reopened).toEqual({ open: true, connected: true });
       expect(await gateway.getRequests("models.list")).toHaveLength(previousRequestCount);
-      await revealChatModelOption(modelOption(composer, "example/first-open"));
+      await revealChatModelOption(composer, "example/first-open");
       expect(await modelOption(composer, "example/first-open").isVisible()).toBe(true);
+      await expectText(modelOption(composer, "example/first-open"), "First open republished");
       await gateway.emitGatewayEvent("chat.metadata.changed", {});
       await gateway.waitForRequest("models.list", { after: previousRequestCount });
       await expectVisible(modelOption(composer, "example/published"));

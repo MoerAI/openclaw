@@ -6,9 +6,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { racePromiseWithAbortSignal } from "../../packages/retry/src/index.js";
 import { runtimeProcessEntrypoints } from "../infra/runtime-process-entrypoints.js";
 import { resolveRuntimeWorkerUrl } from "../infra/runtime-worker-url.js";
-import { getOrLoadSqliteDatabaseAdmissionForPath } from "../infra/sqlite-database-admission.js";
 import { throwSqliteLifecycleErrors } from "../infra/sqlite-lifecycle-errors.js";
-import { schemaAdmission } from "../infra/sqlite-schema-admission.js";
 import type { SqliteWorkerCloseReceipt } from "../infra/sqlite-worker-contract.js";
 import {
   assertExistingDatabaseIdentity,
@@ -32,7 +30,10 @@ import {
   AgentDatabaseExecutionAdmissionClosedError,
   AgentDatabaseSchemaAdmissionChangedError,
 } from "./agent-database-admission-error.js";
-import { captureAgentDatabasePreparationJournal } from "./agent-database-admission.js";
+import {
+  captureAgentDatabasePreparationJournal,
+  recordAgentDatabaseStartupFtsRepair,
+} from "./agent-database-admission.js";
 import { captureAgentDeletionCleanupAdmission } from "./agent-deletion-cleanup-admission.js";
 import type { OpenClawAgentDatabaseWorkerLeaseReceipt } from "./openclaw-agent-db-lease.js";
 import {
@@ -193,15 +194,24 @@ export function createAgentDatabaseNativeGeneration(
         if (cleanup?.authorize(request)) {
           return undefined;
         }
-        if (
-          request.stage === "prepare" &&
-          isRecord(facts) &&
-          facts.kind === "agent-registration-committed"
-        ) {
-          return undefined;
-        }
         assertCurrent();
         cleanup?.assertCurrent();
+        if (request.stage === "prepare" && isRecord(facts) && facts.kind === "agent-startup-fts") {
+          assertSourceCurrent();
+          if (
+            !assertPreparationJournal ||
+            !lease ||
+            (facts.message !== undefined && typeof facts.message !== "string")
+          ) {
+            throw new Error("FTS repair requires live Gateway startup admission");
+          }
+          recordAgentDatabaseStartupFtsRepair(
+            [expectedIdentity?.physicalIdentity ?? pathname, expectedIdentity?.birthtime].join(":"),
+            context.admission.databasePath,
+            facts.message,
+          );
+          return undefined;
+        }
         if (!nativeIdentity || creatingIdentity) {
           assertCallerCurrent?.();
         }
@@ -337,6 +347,14 @@ export function createAgentDatabaseNativeGeneration(
         nativeLocations,
         assertCurrent,
         authorize(request) {
+          if (
+            request.stage === "prepare" &&
+            isRecord(request.facts) &&
+            request.facts.kind === "agent-registration-committed"
+          ) {
+            // observeNative records this past COMMIT; subsequent work still requires live authority.
+            return;
+          }
           const identity = authorizeNative(request);
           if (request.stage === "open" && registration) {
             assertSourceCurrent();
@@ -552,8 +570,7 @@ export function createAgentDatabaseNativeGeneration(
       assertCallerCurrent?.();
       signal?.throwIfAborted();
     };
-    const wasPrepared = preparationPublished;
-    const finishPreparation = wasPrepared ? undefined : sharedPreparation.retain();
+    const finishPreparation = preparationPublished ? undefined : sharedPreparation.retain();
     const publication = finishPreparation
       ? sharedPreparation.follow(source, assertOperationCurrent)
       : undefined;
@@ -578,24 +595,13 @@ export function createAgentDatabaseNativeGeneration(
       const schema = createIfMissing
         ? getOpenClawAgentDatabaseValidationForTransfer({ agentId, path: pathname })?.schema
         : undefined;
-      // Raw in-process DDL also invalidates the physical owner's catalog, even when
-      // that connection has never borrowed the agent's validation receipt.
-      const admittedSchema =
-        createIfMissing && wasPrepared && !schema?.postgres
-          ? getOrLoadSqliteDatabaseAdmissionForPath(pathname, schemaAdmission, () => undefined)
-          : undefined;
-      const requiresReadmission =
-        createIfMissing &&
-        wasPrepared &&
-        (!schema ||
-          Atomics.load(new Int32Array(schema.valid), 0) !== 1 ||
-          (!schema.postgres &&
-            (!admittedSchema ||
-              admittedSchema.schemaVersion !== schema.facts.schemaVersion ||
-              admittedSchema.userVersion !== schema.facts.userVersion)) ||
-          captureAgentDatabasePreparationJournal(agentId, { env: input.environment }) !==
-            undefined);
-      if (!nativeIdentity || requiresReadmission) {
+      // Explicitly invalidated proof must be prepared in the worker before host adoption.
+      if (
+        !nativeIdentity ||
+        (createIfMissing &&
+          preparationPublished &&
+          (!schema || Atomics.load(new Int32Array(schema.valid), 0) !== 1))
+      ) {
         const registration = captureOpenClawAgentDatabaseRegistration({
           agentId,
           agentPath: pathname,
@@ -644,7 +650,7 @@ export function createAgentDatabaseNativeGeneration(
     },
     getPendingNativeOpen: sharedPreparation.getPendingNativeOpen,
     getPendingPreparation: sharedPreparation.getPendingPreparation,
-    captureClaim() {
+    captureClaim(assertBorrowed) {
       assertCurrent();
       const captured = nativeIdentity;
       if (!captured) {
@@ -654,6 +660,7 @@ export function createAgentDatabaseNativeGeneration(
         identity: captured.physicalIdentity,
         incarnation: captured.incarnation,
         assertCurrent() {
+          assertBorrowed();
           assertCurrent();
         },
       };
@@ -688,7 +695,7 @@ export function createAgentDatabaseNativeGeneration(
               stopped: nativeStopped,
               assertOwned: assertCleanupOwned,
               lease,
-              refusedBeforeAgentOpen: readOpenRefused?.(),
+              readOpenRefused,
               closed: () =>
                 storeClosed
                   ? readAgentDatabaseClosedReceipt(readCloseReceipt?.(), nativeIdentity, lease)

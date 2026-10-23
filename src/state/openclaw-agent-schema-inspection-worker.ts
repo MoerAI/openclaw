@@ -2,7 +2,6 @@ import { fork } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { FileIdentityStat } from "@openclaw/fs-safe/advanced";
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
-import { createSessionWorkerExecutionSource } from "../config/sessions/session-worker-execution-source.js";
 import {
   assertChildRuntimeAvailable,
   observeChildRuntime,
@@ -76,6 +75,7 @@ export function createAgentSchemaInspectionWorker() {
   let inspectionCount = 0;
   let snapshotCount = 0;
   let sequence = 0;
+  let releasePrestart: (() => void) | undefined;
   const startReader = (timeoutMs: number): ReaderProcess => {
     const entry = resolveRuntimeProcessEntrypointUrl("agentSchemaInspection");
     assertChildRuntimeAvailable();
@@ -131,6 +131,7 @@ export function createAgentSchemaInspectionWorker() {
           !input.inspectOwnership &&
           !input.inspectEmptyStore;
         let postgresAgent = Boolean(getDatabaseEngineInput("agent"));
+        let postgresAgentId: string | undefined;
         const selection = getDatabaseEngineSelection();
         if (schemaOnly && selection?.postgres) {
           // Update admission includes retained stores that can differ from the selected engine.
@@ -173,10 +174,8 @@ export function createAgentSchemaInspectionWorker() {
               "PostgreSQL agent inspection requires its live engine owner, not a SQLite snapshot.",
             );
           }
-          const {
-            captureOpenClawAgentDatabaseExecution,
-            getPendingOpenClawAgentDatabasePreparation,
-          } = await import("./openclaw-agent-execution.js");
+          const { getPendingOpenClawAgentDatabasePreparation } =
+            await import("./openclaw-agent-execution.js");
           await getPendingOpenClawAgentDatabasePreparation(input.pathname);
           signal?.throwIfAborted();
           let agentId =
@@ -206,30 +205,11 @@ export function createAgentSchemaInspectionWorker() {
             }
             agentId = target.agentId;
           }
-          const execution = captureOpenClawAgentDatabaseExecution({
-            agentId,
-            path: input.pathname,
-            env: input.env,
-          });
-          try {
-            const result = await execution.runExisting(
-              createSessionWorkerExecutionSource(
-                () => signal?.throwIfAborted(),
-                "Agent schema inspection admission expired",
-              ),
-              (scope) =>
-                scope.execute({ type: "database.schema.inspect", input: undefined }, { signal }),
-            );
-            if (result) {
-              inspectionCount += 1;
-            }
-            return result ?? null;
-          } finally {
-            await execution.release();
-          }
+          postgresAgentId = agentId;
         }
         if (
           kind !== "state" &&
+          !postgresAgent &&
           !snapshotPath &&
           input.requireStartupMigrationReadiness &&
           readSqliteDatabaseCleanClose(input.pathname)
@@ -279,6 +259,8 @@ export function createAgentSchemaInspectionWorker() {
         );
         const active = (reader ??= startReader(timeoutMs));
         active.closeBudgetMs = timeoutMs;
+        releasePrestart?.();
+        releasePrestart = undefined;
         const requestId = ++sequence;
         const response = createDeferredCore<AgentSchemaInspection | StateSchemaInspection | null>();
         let failure: Error | undefined;
@@ -370,7 +352,18 @@ export function createAgentSchemaInspectionWorker() {
         signal?.addEventListener("abort", onAbort, { once: true });
         try {
           active.child.send(
-            { type: kind === "state" ? "inspect-state" : "inspect", requestId, input, snapshot },
+            {
+              type: kind === "state" ? "inspect-state" : "inspect",
+              requestId,
+              input: {
+                ...input,
+                ...(postgresAgentId ? { agentId: postgresAgentId } : {}),
+                // Advanced IPC cannot clone the Windows case-insensitive env Proxy.
+                ...("env" in input && input.env ? { env: { ...input.env } } : {}),
+              },
+              snapshot,
+              ...(kind === "agent" && postgresAgent ? { databaseEngineSelection: selection } : {}),
+            },
             (error) => {
               if (error) {
                 failure ??= error;
@@ -404,6 +397,27 @@ export function createAgentSchemaInspectionWorker() {
     },
   };
   return {
+    /** Load the isolated reader while startup discovers its targets; no database is opened. */
+    prestart(callerSignal?: AbortSignal): void {
+      const signal = resolveSqliteInspectionSignal(callerSignal);
+      signal?.throwIfAborted();
+      if (disposed || busy) {
+        throw new Error("Agent schema inspection worker is unavailable for prestart");
+      }
+      if (reader) {
+        return;
+      }
+      // An unused reader has no work to settle. Inspection installs its full budget below.
+      const active = (reader = startReader(0));
+      const onAbort = () => {
+        active.retired = true;
+        active.child.kill("SIGKILL");
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const release = () => signal?.removeEventListener("abort", onAbort);
+      releasePrestart = release;
+      void active.closed.then(release);
+    },
     get processCount() {
       return processCount;
     },
@@ -437,6 +451,8 @@ export function createAgentSchemaInspectionWorker() {
     },
     async [Symbol.asyncDispose]() {
       disposed = true;
+      releasePrestart?.();
+      releasePrestart = undefined;
       if (!reader) {
         return;
       }

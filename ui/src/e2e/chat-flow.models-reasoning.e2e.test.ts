@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import { expect, it } from "vitest";
-import type { ChatPaneElement } from "../pages/chat/route-draft-focus-handoff.ts";
+import type { ChatPaneElement } from "../pages/chat/chat-pane-elements.ts";
 import { revealChatModelOption, selectChatModelOption } from "../test-helpers/select-picker-e2e.ts";
 import {
   chatSessionListResponse,
@@ -281,9 +281,11 @@ suite.define(() => {
       },
     );
 
+    await main.locator(".agent-chat__composer-combobox textarea").click();
     await control(main, "model-select").click();
     const menu = main.locator(".chat-controls__model-menu");
     await expect.poll(() => menu.isVisible()).toBe(true);
+    await revealChatModelOption(main, "openai/long-model");
     for (const [part, text] of [
       ["name", "A deliberately very long model name that must ellipsize inside the provider grid"],
       ["meta", "deliberately-long-context-metadata-that-must-never-create-horizontal-scroll"],
@@ -342,7 +344,7 @@ suite.define(() => {
     const selectModel = async (value: string) => {
       await control(activePane, "model-select").click();
       const model = option(activePane, value);
-      await revealChatModelOption(model, { timeout: 10_000 });
+      await revealChatModelOption(activePane, value, { timeout: 10_000 });
       await model.click();
     };
 
@@ -404,13 +406,13 @@ suite.define(() => {
 
     const modelSelect = control(main, "model-select").first();
     await modelSelect.waitFor(visible);
-    expect(await modelSelect.textContent()).toContain("Claude Opus 4.5");
+    await expect.poll(() => modelSelect.textContent()).toContain("Claude Opus 4.5");
     await modelSelect.click();
     await expect
       .poll(() => control(main, "model-default").first().getAttribute("aria-selected"))
       .toBe("true");
 
-    await selectChatModelOption(option(main, "openai/gpt-5.5"));
+    await selectChatModelOption(main, "openai/gpt-5.5");
     const firstPatch = await gateway.waitForRequest("sessions.patch");
     expect(requireRecord(firstPatch.params)).toEqual({
       expectedSessionId: "session:agent:ops:session-a",
@@ -425,7 +427,10 @@ suite.define(() => {
     const defaultModel = main.locator(
       '[data-chat-model-option="anthropic/claude-opus-4-5"][data-chat-model-default="true"]',
     );
-    await revealChatModelOption(defaultModel, { timeout: 10_000 });
+    await revealChatModelOption(main, "anthropic/claude-opus-4-5", {
+      default: true,
+      timeout: 10_000,
+    });
     expect(await defaultModel.textContent()).toContain("Default");
     expect(await option(main, "").count()).toBe(0);
     await defaultModel.click();
@@ -498,7 +503,7 @@ suite.define(() => {
     const expectedThinkingValues = thinkingLevels.map((level) => level.id).join(",");
 
     await modelSelect.waitFor(visible);
-    expect(await modelSelect.textContent()).toContain("GPT-5.6 Sol");
+    await expect.poll(() => modelSelect.textContent()).toContain("GPT-5.6 Sol");
     expect(await modelSelect.textContent()).not.toContain("@openai:");
     const inspectProfile = async () => {
       await modelSelect.click();
@@ -510,7 +515,7 @@ suite.define(() => {
       await attribute(thinkingSlider, "data-chat-thinking-values").toBe(expectedThinkingValues);
       const value = await effortSelect.getAttribute("data-chat-thinking-value");
       await modelSelect.click();
-      await revealChatModelOption(modelOption);
+      await revealChatModelOption(main, "openai/gpt-5.6-sol");
       return value;
     };
     const defaultThinkingValue = await inspectProfile();
@@ -555,7 +560,7 @@ suite.define(() => {
 
     await main.locator(setting.trigger).click();
     if (setting.label === "model override") {
-      await revealChatModelOption(main.locator(setting.option));
+      await revealChatModelOption(main, bedrockModel);
     }
     await main.locator(setting.option).click();
     const patchRequest = await gateway.waitForRequest("sessions.patch");
@@ -656,7 +661,7 @@ suite.define(() => {
     await page.keyboard.type("anthropic");
     const anthropicModel = option(main, "anthropic/claude-fable-5");
     await expect.poll(() => anthropicModel.isVisible()).toBe(true);
-    await expect.poll(() => option(main, "openai/gpt-5.6-sol").getAttribute("hidden")).toBe("");
+    await option(main, "openai/gpt-5.6-sol").waitFor({ state: "detached" });
     await expectRequestCountStable(gateway, "sessions.patch", 1);
     await search.press("Enter");
     const patches = await waitForRequests(gateway, "sessions.patch", 2);
