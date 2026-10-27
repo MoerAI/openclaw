@@ -1,8 +1,13 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readRegularFile, resolvePathPrefixSync } from "@openclaw/fs-safe/advanced";
+import {
+  readRegularFile,
+  readRegularFileSync,
+  resolvePathPrefixSync,
+  sameFileIdentity,
+} from "@openclaw/fs-safe/advanced";
 import { replaceFileAtomic } from "@openclaw/fs-safe/atomic";
 import { isPathInside } from "@openclaw/fs-safe/path";
 import {
@@ -28,7 +33,7 @@ type CompletionProfileEncoding = "utf8" | "utf8bom" | "utf16le" | "utf16be";
 
 async function readCompletionProfile(profilePath: string, shell: CompletionShell) {
   const filePath = await fs.realpath(profilePath);
-  const { buffer, stat } = await readRegularFile({ filePath });
+  const { buffer, stat, exactIdentity } = await readRegularFile({ filePath });
   let encoding: CompletionProfileEncoding = "utf8";
   if (shell === "powershell" && process.platform === "win32") {
     const [first, second, third] = buffer;
@@ -45,6 +50,8 @@ async function readCompletionProfile(profilePath: string, shell: CompletionShell
     encoding,
     filePath,
     mode: stat.mode & 0o7777,
+    buffer,
+    exactIdentity,
   };
 }
 
@@ -416,18 +423,10 @@ export async function removeCompletionRegistrations(
   const cachePaths = COMPLETION_SHELLS.flatMap((shell) =>
     opts.stateDirs.map((stateDir) => resolveCompletionCachePath(shell, "openclaw", stateDir)),
   ).filter((cachePath) => !opts.preservePaths.some((kept) => isPathInside(kept, cachePath)));
-  const sources = [...new Set(cachePaths.flatMap(cachedCompletionSourceLines))]
-    .map(escapeRegExp)
-    .join("|");
-  if (!sources) {
+  const sources = [...new Set(cachePaths.flatMap(cachedCompletionSourceLines))];
+  if (sources.length === 0) {
     return affected;
   }
-  // Match complete literal commands, including quoted paths containing newlines.
-  // A marker belongs to us only when its immediate next command is selected.
-  const registration = new RegExp(
-    `^(?:[\\t ]*# OpenClaw Completion[\\t ]*\\r?\\n)?[\\t ]*(?:${sources})[\\t ]*(?:\\r?\\n|$)`,
-    "gm",
-  );
   for (const shell of COMPLETION_SHELLS) {
     const profiles =
       shell === "bash"
@@ -458,23 +457,54 @@ export async function removeCompletionRegistrations(
       if (visited.has(profile.filePath)) {
         continue;
       }
-      // Retain every unowned byte, including mixed line endings and orphan markers.
-      const next = profile.content.replace(registration, "");
-      if (next === profile.content) {
+      // UTF-8 cache commands can coexist with locale-encoded user bytes.
+      const utf16 = profile.encoding === "utf16le" || profile.encoding === "utf16be";
+      const content = utf16 ? profile.content : profile.buffer.toString("latin1");
+      const pattern = sources
+        .map((line) => escapeRegExp(utf16 ? line : Buffer.from(line).toString("latin1")))
+        .join("|");
+      const start = utf16 ? "^" : "(?:^|(?<=^\\xEF\\xBB\\xBF))";
+      const registration = new RegExp(
+        `${start}(?:[\\t ]*# OpenClaw Completion[\\t ]*\\r?\\n)?[\\t ]*(?:${pattern})[\\t ]*(?:\\r?\\n|$)`,
+        "gm",
+      );
+      const next = content.replace(registration, "");
+      if (next === content) {
         continue;
+      }
+      if (utf16 && !encodeCompletionProfile(content, profile.encoding).equals(profile.buffer)) {
+        throw new Error(
+          `Cannot safely update malformed PowerShell profile ${sanitizeTerminalText(profilePath)}. Repair its encoding and retry uninstall.`,
+        );
       }
       visited.add(profile.filePath);
       if (!opts.dryRun) {
         const directory = await fs.stat(path.dirname(profile.filePath));
         await replaceFileAtomic({
           filePath: profile.filePath,
-          content: encodeCompletionProfile(next, profile.encoding),
+          content: utf16
+            ? encodeCompletionProfile(next, profile.encoding)
+            : Buffer.from(next, "latin1"),
           mode: profile.mode,
           dirMode: directory.mode & 0o7777,
           tempPrefix: ".openclaw-completion-profile",
           syncTempFile: true,
           syncParentDir: true,
-          assertBeforeMutation: opts.assertCurrent,
+          assertBeforeMutation: () => {
+            // Editors do not share state ownership; retain their exact profile snapshot too.
+            const filePath = realpathSync(profilePath);
+            const current = readRegularFileSync({ filePath });
+            if (
+              filePath !== profile.filePath ||
+              !sameFileIdentity(current.exactIdentity, profile.exactIdentity) ||
+              !current.buffer.equals(profile.buffer) ||
+              (current.stat.mode & 0o7777) !== profile.mode ||
+              (statSync(path.dirname(filePath)).mode & 0o7777) !== (directory.mode & 0o7777)
+            ) {
+              throw new Error("Completion profile changed during cleanup; retry uninstall.");
+            }
+            opts.assertCurrent();
+          },
         });
       }
       affected.push(profilePath);

@@ -102,11 +102,7 @@ it.skipIf(process.platform === "win32").for([false, true])(
   async (fifo, { homeDir }) => {
     await writeCompletionCache("zsh");
     const profilePath = path.join(homeDir, ".zshrc");
-    if (fifo) {
-      execFileSync("mkfifo", [profilePath]);
-    } else {
-      await fs.symlink("/dev/null", profilePath);
-    }
+    await (fifo ? execFileSync("mkfifo", [profilePath]) : fs.symlink("/dev/null", profilePath));
     await expect(isCompletionInstalled("zsh")).rejects.toThrow(/regular file/);
     await expect(usesSlowDynamicCompletion("zsh")).rejects.toThrow(/regular file/);
     await expect(installCompletion("zsh", true)).rejects.toThrow(/regular file/);
@@ -205,13 +201,19 @@ literalIt.for(["bash", "zsh"] as const)(
   },
 );
 
-it.for(["install", "remove", "invalidate"] as const)(
+it.for([
+  ["install", "Failed to install completion: injected completion profile write failure"],
+  ["remove", "injected completion profile write failure"],
+  ["invalidate", "completion ownership invalidated"],
+  ["concurrent", "Completion profile changed during cleanup"],
+] as const)(
   "preserves an existing profile when atomic publication fails: %s",
-  async (operation, { homeDir, stateDir }) => {
+  async ([operation, error], { homeDir, stateDir }) => {
     const cachePath = await writeCompletionCache("zsh");
     const original =
       "export IMPORTANT=keep\n" + (operation === "install" ? "" : `source "${cachePath}"\n`);
     const profilePath = await writeProfile("zsh", original);
+    const edit = operation === "concurrent" ? "export CONCURRENT=keep\n" : "";
     await fs.chmod(profilePath, 0o640);
     const open = fs.open;
     let current = true;
@@ -222,10 +224,12 @@ it.for(["install", "remove", "invalidate"] as const)(
         await sync();
         if (operation === "invalidate") {
           current = false;
-          return;
+        } else if (edit) {
+          await fs.appendFile(profilePath, edit);
+        } else {
+          await handle.truncate(1);
+          throw new Error("injected completion profile write failure");
         }
-        await handle.truncate(1);
-        throw new Error("injected completion profile write failure");
       });
       return handle;
     });
@@ -238,14 +242,8 @@ it.for(["install", "remove", "invalidate"] as const)(
       operation === "install"
         ? installCompletion("zsh", true, "openclaw")
         : removeSelectedCompletion(stateDir, assertCurrent),
-    ).rejects.toThrow(
-      operation === "install"
-        ? "Failed to install completion: injected completion profile write failure"
-        : operation === "invalidate"
-          ? "completion ownership invalidated"
-          : "injected completion profile write failure",
-    );
-    await expect(readProfile(profilePath)).resolves.toBe(original);
+    ).rejects.toThrow(error);
+    await expect(readProfile(profilePath)).resolves.toBe(original + edit);
     await expectProfileMode(profilePath);
     expect(await fs.readdir(homeDir)).toEqual([".zshrc"]);
   },
@@ -356,7 +354,12 @@ it("preserves unrelated sources during installation and selected-state removal",
   const retained =
     [unrelatedSource, unmarkedPriorSource, ...markedUserSources].join("\n") +
     `\n# OpenClaw Completion\r\nexport IMPORTANT=keep\n# OpenClaw Completion\nsource "${keptCache}"\r\nsource "${cachePath}"; export COMPOUND=keep\r\nsource <(openclaw completion --shell bash)\n`;
-  const content = `# OpenClaw Completion\r\n[ -f "${cachePath}" ] && source "${cachePath}"\n${retained}source "${cachePath}"`;
+  const content = Buffer.from(
+    `# OpenClaw Completion\r\n[ -f "${cachePath}" ] && source "${cachePath}"\n${retained}source "${cachePath}"`,
+  );
+  const expected = Buffer.from(retained);
+  expected[0] = 0xff;
+  content[content.indexOf(retained)] = 0xff;
   const profiles = [path.join(homeDir, ".bashrc"), profilePath];
   for (const file of profiles) {
     await fs.writeFile(file, content);
@@ -367,7 +370,7 @@ it("preserves unrelated sources during installation and selected-state removal",
   for (const removal of [{ dryRun: true }, { assertCurrent: () => {} }] as const) {
     await expect(removeCompletionRegistrations({ ...opts, ...removal })).resolves.toEqual(profiles);
     for (const file of profiles) {
-      await expect(readProfile(file)).resolves.toBe("dryRun" in removal ? content : retained);
+      await expect(fs.readFile(file)).resolves.toEqual("dryRun" in removal ? content : expected);
       await expectProfileMode(file);
     }
     expect(await fs.readdir(homeDir)).toEqual(tree);

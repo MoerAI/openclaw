@@ -28,8 +28,9 @@ directories unless you also select `--workspace`.
 State removal also removes literal completion-cache registrations for that
 state directory before deleting the cache. Registrations for other profiles,
 user-managed portable hooks, unrelated shell settings, and shared PATH entries
-remain intact. If a shell profile cannot be updated, state deletion stops so
-you can fix the profile permissions and retry.
+remain intact. If a shell profile cannot be updated, or a concurrent edit is
+detected before replacement, state deletion stops. Resolve the reported profile
+error and retry.
 
 Preview what will be removed (safe):
 

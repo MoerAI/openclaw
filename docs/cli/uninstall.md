@@ -56,9 +56,10 @@ Uninstall reports each requested scope and exits nonzero if any requested cleanu
   state directories' registrations, user-managed portable hooks, orphan
   markers, and unrelated profile content and permissions.
 - `--dry-run --state` reports affected profiles without changing them. If a
-  profile cannot be read or updated, state removal stops; correct its access
-  permissions and retry. Profiles are not changed when state ownership is
-  blocked. `reset` does not remove completion registrations.
+  profile cannot be read or updated, state removal stops; resolve the reported
+  profile error and retry. A concurrent profile edit detected before replacement
+  also stops cleanup. Profiles are not changed when state ownership is blocked.
+  `reset` does not remove completion registrations.
 
 ## Related
 
