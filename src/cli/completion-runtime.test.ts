@@ -17,7 +17,6 @@ import {
   resolveShellFromEnv,
   usesSlowDynamicCompletion,
 } from "./completion-runtime.js";
-import * as outputFile from "./output-file.runtime.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => {
@@ -214,23 +213,22 @@ it.for(["install", "remove", "invalidate"] as const)(
       "export IMPORTANT=keep\n" + (operation === "install" ? "" : `source "${cachePath}"\n`);
     const profilePath = await writeProfile("zsh", original);
     await fs.chmod(profilePath, 0o640);
-    const publish = outputFile.publishOutputFileAtomically;
+    const open = fs.open;
     let current = true;
-    vi.spyOn(outputFile, "publishOutputFileAtomically").mockImplementationOnce(async (params) =>
-      publish({
-        ...params,
-        writeTemp: async (tempPath) => {
-          await params.writeTemp(tempPath);
-          if (operation === "invalidate") {
-            // Revoke ownership only after the real sibling temp has been written.
-            current = false;
-            return;
-          }
-          await fs.truncate(tempPath, 1);
-          throw new Error("injected completion profile write failure");
-        },
-      }),
-    );
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => {
+        await sync();
+        if (operation === "invalidate") {
+          current = false;
+          return;
+        }
+        await handle.truncate(1);
+        throw new Error("injected completion profile write failure");
+      });
+      return handle;
+    });
     const assertCurrent = () => {
       if (!current) {
         throw new Error("completion ownership invalidated");

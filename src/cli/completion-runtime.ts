@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { readRegularFile, resolvePathPrefixSync } from "@openclaw/fs-safe/advanced";
+import { replaceFileAtomic } from "@openclaw/fs-safe/atomic";
 import { isPathInside } from "@openclaw/fs-safe/path";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -27,7 +28,7 @@ type CompletionProfileEncoding = "utf8" | "utf8bom" | "utf16le" | "utf16be";
 
 async function readCompletionProfile(profilePath: string, shell: CompletionShell) {
   const filePath = await fs.realpath(profilePath);
-  const { buffer } = await readRegularFile({ filePath });
+  const { buffer, stat } = await readRegularFile({ filePath });
   let encoding: CompletionProfileEncoding = "utf8";
   if (shell === "powershell" && process.platform === "win32") {
     const [first, second, third] = buffer;
@@ -43,6 +44,7 @@ async function readCompletionProfile(profilePath: string, shell: CompletionShell
       encoding === "utf8" ? buffer.toString("utf8") : decodeWindowsTextFileBuffer({ buffer }),
     encoding,
     filePath,
+    mode: stat.mode & 0o7777,
   };
 }
 
@@ -463,17 +465,16 @@ export async function removeCompletionRegistrations(
       }
       visited.add(profile.filePath);
       if (!opts.dryRun) {
-        opts.assertCurrent();
-        await publishOutputFileAtomically({
+        const directory = await fs.stat(path.dirname(profile.filePath));
+        await replaceFileAtomic({
           filePath: profile.filePath,
+          content: encodeCompletionProfile(next, profile.encoding),
+          mode: profile.mode,
+          dirMode: directory.mode & 0o7777,
           tempPrefix: ".openclaw-completion-profile",
-          durable: true,
-          assertCurrent: opts.assertCurrent,
-          writeTemp: async (tempPath) => {
-            await fs.writeFile(tempPath, encodeCompletionProfile(next, profile.encoding), {
-              flag: "wx",
-            });
-          },
+          syncTempFile: true,
+          syncParentDir: true,
+          assertBeforeMutation: opts.assertCurrent,
         });
       }
       affected.push(profilePath);

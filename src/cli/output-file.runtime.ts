@@ -11,7 +11,6 @@ export async function publishOutputFileAtomically<T>(params: {
   writeTemp: (tempPath: string) => Promise<T>;
   tempPrefix?: string;
   durable?: boolean;
-  assertCurrent?: () => void;
 }): Promise<T> {
   const dir = path.dirname(params.filePath);
   await fs.mkdir(dir, { recursive: true });
@@ -25,10 +24,7 @@ export async function publishOutputFileAtomically<T>(params: {
     ...(mode === undefined ? {} : { mode }),
     ...(params.durable ? { syncTempFile: true, syncParentDir: true } : {}),
     writeTemp: params.writeTemp,
-    resolveFinalPath: () => {
-      params.assertCurrent?.();
-      return params.filePath;
-    },
+    resolveFinalPath: () => params.filePath,
   });
   return result;
 }

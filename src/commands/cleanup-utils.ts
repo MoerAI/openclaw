@@ -409,7 +409,7 @@ export async function removeStateAndLinkedPaths(
       for (const profilePath of await removeCompletionRegistrations({
         stateDirs: [...new Set([requestedStateDir, stateDir])],
         preservePaths: [
-          ...requestedPreservePaths,
+          ...preservePaths,
           ...preservePaths.map((target) =>
             path.join(stateDir, path.relative(requestedStateDir, target)),
           ),
@@ -509,7 +509,12 @@ export async function removeStateAndLinkedPaths(
     if (opts?.removeCompletionHooks) {
       for (const profilePath of await removeCompletionRegistrations({
         stateDirs: [...new Set([requestedStateDir, stateDir])],
-        preservePaths: [...requestedPreservePaths, ...preservePaths],
+        preservePaths: [
+          ...preservePaths,
+          ...preservePaths.map((target) =>
+            path.join(requestedStateDir, path.relative(stateDir, target)),
+          ),
+        ],
         assertCurrent: () => admission.assertCurrent(),
       })) {
         runtime.log(

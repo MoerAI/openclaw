@@ -209,8 +209,9 @@ it.each([
   async (_command, nixMode, serviceChecks, uninstall) => {
     const state = await makeState();
     configState.isNixMode = nixMode;
-    const workspacePath = path.join(state.workspaceDir, "project.bin");
-    await state.writeConfig({ agents: { entries: { main: { workspace: state.workspaceDir } } } });
+    const workspaceDir = uninstall ? state.root : state.workspaceDir;
+    const workspacePath = path.join(workspaceDir, "project.bin");
+    await state.writeConfig({ agents: { entries: { main: { workspace: workspaceDir } } } });
     const markerPath = await state.writeText("keep.txt", "preserved");
     await fs.mkdir(path.dirname(workspacePath), { recursive: true });
     await fs.writeFile(workspacePath, Buffer.from([0, 1, 2, 3, 255]));
