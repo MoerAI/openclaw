@@ -2,9 +2,34 @@ import { executeExistingOpenClawStateRead } from "./openclaw-state-db-readonly.j
 import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context.js";
 import { captureUserProfileAuthorityRead } from "./user-profile-events.js";
+import { prepareUserProfileCatalog, readUserProfileSnapshot } from "./user-profile-list.js";
 import type { CachedGitHubIdentity, CachedGitHubIdentityBinding } from "./user-profiles.types.js";
 
 type ProfileReadOptions = Pick<OpenClawStateDatabaseOptions, "path" | "env">;
+
+/** Fresh identity snapshots avoid foreign-process catalog reuse; local mutations fence consumption. */
+export async function prepareCurrentUserProfileIdentity(
+  profileId: string,
+  options: ProfileReadOptions = {},
+) {
+  const context = captureOpenClawStateWorkerContext(options);
+  // Incoming merges change the target's alias cohort, but not its identity cell.
+  const authority = await captureUserProfileAuthorityRead(context.admission);
+  const reply = await executeExistingOpenClawStateRead(
+    { path: context.admission.databasePath, env: context.environment },
+    { type: "userProfiles.identity", profileId },
+    { context, current: true },
+  );
+  const profile = reply?.profile;
+  const isCurrent = authority.bind([profileId, profile?.profileId ?? profileId]);
+  const assertCurrent = () => {
+    if (!isCurrent?.()) {
+      throw new Error("Profile identity changed while preparing disclosure. Retry the request.");
+    }
+  };
+  assertCurrent();
+  return { profile, assertCurrent };
+}
 
 /** Fresh disclosure aliases retain their physical store and merge authority across caller waits. */
 export async function prepareCurrentUserProfileAliases(
@@ -13,23 +38,24 @@ export async function prepareCurrentUserProfileAliases(
 ) {
   const context = captureOpenClawStateWorkerContext(options);
   const authority = await captureUserProfileAuthorityRead(context.admission, undefined, "identity");
-  const reply = await executeExistingOpenClawStateRead(
-    { path: context.admission.databasePath, env: context.environment },
-    { type: "userProfiles.aliases.resolve", profileId },
-    { current: true },
-  );
-  context.admission.assertCurrent();
-  if (reply && (!reply.ok || reply.type !== "userProfiles.aliases.resolve")) {
-    throw new Error("Profile alias reader returned an unexpected result");
+  const catalog = await prepareUserProfileCatalog({
+    ...options,
+    path: context.admission.databasePath,
+  });
+  let profile;
+  try {
+    profile = catalog.readCurrentIdentity(profileId);
+  } finally {
+    catalog.release();
   }
-  const isCurrent = authority.bind([profileId, reply?.profileId ?? profileId]);
+  const isCurrent = authority.bind([profileId, profile?.profileId ?? profileId]);
   const assertCurrent = () => {
     if (!isCurrent?.()) {
       throw new Error("Profile aliases changed while preparing disclosure. Retry the request.");
     }
   };
   assertCurrent();
-  return { aliases: new Set(reply?.aliases ?? [profileId]), assertCurrent };
+  return { aliases: new Set(profile?.aliases ?? [profileId]), assertCurrent };
 }
 
 export async function resolveCanonicalCachedGitHubIdentity(
@@ -43,26 +69,11 @@ export async function resolveCanonicalCachedGitHubIdentity(
   if (!reply) {
     return undefined;
   }
-  if (!reply.ok || reply.type !== "userProfiles.githubIdentity.cached") {
-    throw new Error("Cached GitHub identity reader returned an unexpected result");
-  }
   return reply.identity;
 }
 
 export async function listProfiles(options: ProfileReadOptions = {}) {
   return (await readUserProfileSnapshot(undefined, options)).profiles;
-}
-
-export async function readUserProfileSnapshot(
-  githubAccountIds?: readonly number[],
-  options: ProfileReadOptions = {},
-) {
-  const context = captureOpenClawStateWorkerContext(options);
-  const { executeOpenClawStateWorker } = await import("./openclaw-state-worker-store.js");
-  return await executeOpenClawStateWorker(context, {
-    type: "userProfiles.list",
-    input: githubAccountIds ? { githubAccountIds } : undefined,
-  });
 }
 
 /** Candidate IDs and search labels; current recipient policy remains caller-owned. */

@@ -1,3 +1,4 @@
+import type { AdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
 import type { AgentLifecycleTerminalBackstop } from "../../auto-reply/reply/agent-lifecycle-terminal.js";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
@@ -27,28 +28,34 @@ export type CronRunExecutionParams = Pick<
   | "deliverySystemPrompt"
   | "messageToolFormatPrompt"
   | "sourceDelivery"
+  | "cliSessionBindingFacts"
   | "skillsSnapshot"
   | "agentPayload"
   | "useSubagentFallbacks"
   | "inheritDefaultFallbacksForAgentStringModel"
+  | "sessionModelOverrideSource"
   | "modelFallbacksOverride"
   | "liveSelection"
   | "cronSession"
   | "commandBody"
   | "inputProvenance"
   | "persistSessionEntry"
+  | "preRunSessionPersisted"
 > &
   Pick<
     RunCronAgentTurnParams,
     | "cfg"
     | "job"
+    | "trigger"
     | "lane"
     | "onLaneWait"
     | "executionIdentity"
     | "admissionSource"
     | "deliveryAttemptFence"
+    | "occurrence"
   > & {
     runId: string;
+    operatorAuthority?: AdmittedRunOperatorAuthority;
     agentVerboseDefault: AgentDefaultsConfig["verboseDefault"];
     immutableThinkLevel: ThinkLevel | undefined;
     thinkingCatalog?: ModelCatalogEntry[];
@@ -63,7 +70,7 @@ export type CronRunExecutionParams = Pick<
     isAborted: () => boolean;
     lifecycle: Omit<AgentLifecycleTerminalBackstop, "emit">;
     onPromptAdmission: (admission: { close: () => void; finish: () => Promise<void> }) => void;
-    onExecutionStarted?: (info?: CronRunnerStartedInfo) => void;
+    onExecutionStarted?: (info?: CronRunnerStartedInfo) => void | Promise<void>;
     onExecutionPhase?: (
       info: Pick<CronAgentExecutionPhaseUpdate, "phase"> &
         Partial<Omit<CronAgentExecutionPhaseUpdate, "jobId" | "phase">>,
