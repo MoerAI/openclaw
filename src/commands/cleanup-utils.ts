@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { hasNodeErrorCode, isPathInside } from "@openclaw/fs-safe/path";
 import type { AgentsDeleteResult } from "../../packages/gateway-protocol/src/schema/agents-models-skills.js";
-import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
+import { terminalText } from "../../packages/terminal-core/src/safe-text.js";
 import { listAgentIds, resolveAgentWorkspaceDir } from "../agents/agent-scope-config.js";
 import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace-default.js";
 import {
@@ -417,7 +417,7 @@ export async function removeStateAndLinkedPaths(
         dryRun: true,
       })) {
         runtime.log(
-          `[dry-run] remove completion registration from ${sanitizeTerminalText(shortenHomeInString(profilePath))}`,
+          terminalText`[dry-run] remove completion registration from ${shortenHomeInString(profilePath)}`,
         );
       }
     }
@@ -518,7 +518,7 @@ export async function removeStateAndLinkedPaths(
         assertCurrent: () => admission.assertCurrent(),
       })) {
         runtime.log(
-          `Removed completion registration from ${sanitizeTerminalText(shortenHomeInString(profilePath))}`,
+          terminalText`Removed completion registration from ${shortenHomeInString(profilePath)}`,
         );
       }
     }
