@@ -11,7 +11,7 @@ import {
   resolveMemoryDreamingPluginId,
   resolveMemoryDreamingConfig,
   resolveMemoryDreamingWorkspace,
-  resolveMemoryDreamingWorkspaces,
+  resolveMemoryDreamingWorkspaces as resolveWorkspaces,
 } from "./dreaming.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -116,51 +116,10 @@ it.each([
   expect(executions.map(({ model }) => model)).toEqual(expected);
 });
 
-it.each([
-  ["returns no workspaces for an explicitly empty roster", { agents: { entries: {} } }, []],
-  [
-    "uses default agent fallback",
-    { agents: { entries: { main: {} }, defaults: { workspace: "/workspace" } } },
-    [workspace("/workspace", "main")],
-  ],
-] as const)("%s", (_name, cfg, expected) => {
-  expect(resolveMemoryDreamingWorkspaces(cfg)).toEqual(expected);
-});
-
-it("retains configured owners when the primary workspace is already known", async () => {
-  const root = tempDirs.make("dreaming-known-primary-");
-  const alpha = path.join(root, "alpha");
-  const beta = path.join(root, "beta");
-  const alias = path.join(root, "alpha-alias");
-  await fs.mkdir(alpha);
-  await fs.mkdir(beta);
-  await fs.symlink(alpha, alias, process.platform === "win32" ? "junction" : "dir");
-  const cfg: OpenClawConfig = {
-    agents: {
-      ownership: "explicit",
-      entries: {
-        alpha: { workspace: alpha },
-        beta: { workspace: beta },
-      },
-    },
-  };
-  const expected = [workspace(alpha, "alpha"), workspace(beta, "beta")];
-  for (const primaryWorkspaceDir of [alpha, alias]) {
-    for (const primaryAgentId of [undefined, null, "", " \t "]) {
-      expect(resolveMemoryDreamingWorkspaces(cfg, { primaryWorkspaceDir, primaryAgentId })).toEqual(
-        expected,
-      );
-    }
-  }
-  expect(
-    resolveMemoryDreamingWorkspaces(cfg, { primaryWorkspaceDir: alpha, primaryAgentId: "beta" }),
-  ).toEqual([workspace(alpha, "alpha", "beta"), workspace(beta, "beta")]);
-  expect(() =>
-    resolveMemoryDreamingWorkspaces(cfg, { primaryWorkspaceDir: path.join(root, "unowned") }),
-  ).toThrow(AgentSelectionRequiredError);
-});
-
-it("canonicalizes agents and dedupes non-adjacent symlinks without a default owner", async () => {
+it("preserves workspace ownership, aliases, and explicit primary associations", async () => {
+  expect(resolveWorkspaces({ agents: { entries: {} } })).toEqual([]);
+  const fallback = { agents: { entries: { main: {} }, defaults: { workspace: "/workspace" } } };
+  expect(resolveWorkspaces(fallback)).toEqual([workspace("/workspace", "main")]);
   const root = tempDirs.make("openclaw-dreaming-workspace-");
   const dir = path.join(root, "workspace");
   const alias = path.join(root, "alias");
@@ -178,17 +137,23 @@ it("canonicalizes agents and dedupes non-adjacent symlinks without a default own
       },
     },
   };
-  expect(
-    resolveMemoryDreamingWorkspaces(cfg, {
-      primaryWorkspaceDir: "/main",
-      primaryAgentId: "main",
-    }),
-  ).toEqual([
-    workspace(dir, "team-alpha", "beta"),
+  const roster = [workspace(dir, "team-alpha", "beta"), workspace(other, "gamma")];
+  const main = { primaryWorkspaceDir: "/main", primaryAgentId: "main" };
+  expect(resolveWorkspaces(cfg, main)).toEqual([...roster, workspace("/main", "main")]);
+  for (const primaryWorkspaceDir of [dir, alias]) {
+    for (const primaryAgentId of [undefined, null, "", " \t "]) {
+      expect(resolveWorkspaces(cfg, { primaryWorkspaceDir, primaryAgentId })).toEqual(roster);
+    }
+  }
+  const secondary = { primaryWorkspaceDir: dir, primaryAgentId: "gamma" };
+  expect(resolveWorkspaces(cfg, secondary)).toEqual([
+    workspace(dir, "team-alpha", "beta", "gamma"),
     workspace(other, "gamma"),
-    workspace("/main", "main"),
   ]);
-  expect(resolveMemoryDreamingWorkspace(cfg, alias)).toEqual(workspace(dir, "team-alpha", "beta"));
+  expect(() => resolveWorkspaces(cfg, { primaryWorkspaceDir: path.join(root, "unowned") })).toThrow(
+    AgentSelectionRequiredError,
+  );
+  expect(resolveMemoryDreamingWorkspace(cfg, alias)).toEqual(roster[0]);
 });
 
 it("preserves timezone-aware day selection and local fallback", () => {
