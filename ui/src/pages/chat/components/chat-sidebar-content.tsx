@@ -100,6 +100,7 @@ export type SidebarPanelProps = {
   fileView?: FileViewControls;
   onClose: () => void;
   onOpenImage?: (item: ImageLightboxItem) => void;
+  onBrowseFiles?: () => void;
   onViewRawText: () => void;
   canvasPluginSurfaceUrl?: string | null;
   embedSandboxMode?: EmbedSandboxMode;
@@ -322,6 +323,7 @@ export function SidebarPanel(props: SidebarPanelProps) {
                     }
                     active={props.active ?? content().presentation?.active ?? true}
                     openFileView={content().presentation?.openFileView ?? null}
+                    canEditFile={content().canEditFile ?? null}
                     onOpenMobilePage={content().presentation?.onOpenMobilePage ?? null}
                     scopeRequest={content().presentation?.scopeRequest ?? null}
                     onResult={content().onResult ?? null}
@@ -455,6 +457,7 @@ export function SidebarPanel(props: SidebarPanelProps) {
                       mobile={props.filePresentation === "mobile"}
                       back={props.fileBack}
                       onOpenImage={props.onOpenImage}
+                      onBrowseFiles={props.onBrowseFiles}
                     />
                   </div>
                 )}

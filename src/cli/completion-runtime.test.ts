@@ -461,7 +461,7 @@ it("rejects missing-cache installation and leaves an empty home untouched by rem
 portableIt.skipIf(process.platform === "win32").for([
   [
     "bash",
-    '# OpenClaw Completion\n[[ -f "${HOME}/.openclaw/completions/openclaw.bash" ]] && source "${HOME}/.openclaw/completions/openclaw.bash"',
+    '# User text 合法 � 😀\n# OpenClaw Completion\n[[ -f "${HOME}/.openclaw/completions/openclaw.bash" ]] && source "${HOME}/.openclaw/completions/openclaw.bash"',
     true,
   ],
   [

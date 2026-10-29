@@ -76,6 +76,8 @@ Run links from automation messages and notifications open the exact recorded run
 
 In the Control UI, an open automation refreshes its next-run time and condition activity when scheduler events arrive. These runtime updates preserve unsaved settings and the saved definition used for conflict detection, including when the selected automation is outside the current list page or filter.
 
+Model choices load when you open an automation's settings or create an automation. You can edit the draft while choices load. Model-catalog errors appear in that editor without interrupting the automation list or run history.
+
 ### Conversational management
 
 An authenticated channel sender explicitly listed in `commands.ownerAllowFrom`, or a Control UI administrator with `operator.admin`, can ask the agent to list, inspect, update, run, or remove any existing automation on that Gateway, regardless of its creator or channel. For example, ask it to disable a reminder created in Telegram. This matches the administrator's authority on the **Automations** page. Create command payloads through the operator CLI or Gateway API.
@@ -104,6 +106,15 @@ Doctor does not infer ownership from delivery settings or the current caller.
 Automations created before owner attribution have no recorded owner. Chat can
 still enable, disable, reschedule or remove them, but only a Gateway owner or an
 operator can change their prompt or tools.
+
+Operator-created automations that name an owner conversation run with operator
+authority. That conversation can list, enable, disable, reschedule, run
+or remove them; other conversations cannot see them. Enabling, disabling and
+schedule or timing changes keep operator authority. Any other change
+from the owner conversation, such as the name, prompt, tools, trigger, delivery,
+failure alerts or session target, drops the job to that conversation's own authority. If its owner record has no account, those
+changes need a Gateway owner or an operator, or a new automation. Only a Gateway
+owner or an operator can write its scratch.
 
 ```bash
 # List enabled jobs

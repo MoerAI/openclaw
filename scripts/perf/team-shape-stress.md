@@ -37,7 +37,7 @@ that dozens of synthetic external plugins would introduce.
 
 The seeded mix is 4,300 finished unarchived subagents, 4,400 archived dashboards,
 400 active dashboards, 200 explicit sessions, and 1,500 other sessions including
-small channel/cron cohorts. Four agents are configured; retained rows initially
+small channel/cron cohorts. Four agents are configured by default (`--agents 8` selects eight); retained rows initially
 belong to `main`. Transcripts contain 128 MiB of deterministic, incompressible
 message content with a skewed size distribution. This reproduces session shape,
 not a byte-for-byte copy of a production database. Retained runs are settled collectors
@@ -274,7 +274,8 @@ with the complete scenario mix. Check recorded tool events before claiming that
 any requested behavior was actually exercised.
 
 After the final injection, the controller polls every input's public history until
-accepted inputs settle and their sessions are inactive, or ten minutes pass.
+accepted inputs settle (apart from deliberate crash loss) and their sessions are
+inactive, or ten minutes pass.
 The overall campaign deadline remains a hard bound and may shorten this wait;
 `settlement` records the effective deadline and observed finish. Still-unresolved
 accepted inputs become `timed-out`, never implicitly successful or silently active
@@ -285,6 +286,12 @@ a final assistant message. Quoted markers, commentary, and promises do not count
 Subagent prompts ask for independent, self-contained checks without specifying
 tool arguments or requesting checkouts; successful child launches still require
 recorded evidence.
+
+Graceful restarts resume running root sessions through ordinary inputs. Deliberate
+SIGKILL writes no resume markers: unanswered inputs sent before that crash in its
+active sessions are recorded as accepted crash loss. New post-restart inputs must
+still settle. The dry provider inspects its exact effect marker before appending
+again, following the resume instruction without adding runtime effect replay.
 
 Use `--candidate /path/to/reviewed-checkout` to replay this tooling against another
 revision. Prepare that checkout's build first; `dist/entry.js` is required, matching

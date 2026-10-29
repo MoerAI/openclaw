@@ -137,6 +137,8 @@ matching the paired-node response budget. Healthy siblings still return; backgro
 native hydration can continue warming the next request. Complete catalog `thread/list` pages and metadata-only `thread/read` responses
 up to 64 KiB are parsed and projected inline, avoiding worker startup for small
 catalog refreshes. Larger responses use a worker owned by their app-server client.
+The shared worker pool retires an idle decoder after one minute, extending recurring
+reuse to five minutes; memory pressure and client shutdown can retire it sooner.
 Both paths apply the same projection. The stdout reader waits for the compact result
 before delivering later responses or notifications. It transfers larger responses
 as bytes, admits one worker task at a time, and pauses the transport while that task runs.
@@ -568,6 +570,9 @@ session generation. After Stop settles, you can send another message in the same
 chat without reconnecting.
 Stop also retires an already-interrupted child without interrupting its finished
 turn again, so that child cannot keep its parent session blocked.
+Before retiring a canceled native child, Stop also waits for its owned process
+cleanup. An interrupted turn alone does not prove its commands stopped. This
+includes children whose parent has yielded and children interrupted before Stop.
 If its previous native process is already closing, Stop cancels the waiting run
 without waiting for physical exit. A replacement writer still waits for that exit.
 Session-wide Stop preserves the caller's request ownership, protected-run, and

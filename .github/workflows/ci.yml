@@ -667,7 +667,11 @@ jobs:
                       if deadline is not None and time.monotonic() >= deadline:
                           timed_out = True
                           raise FetchTimeout()
-                      time.sleep(0.05)
+                      # Wake on Git exit without delaying cancellation/deadline checks beyond 50ms.
+                      try:
+                          child.wait(timeout=0.05)
+                      except subprocess.TimeoutExpired:
+                          pass
               finally:
                   # Failed inspection/cleanup permanently fences this policy process. Only
                   # verified extinction permits another command, even after a caught error.
@@ -3587,9 +3591,13 @@ jobs:
       - name: Run Node 24 minimum compatibility
         env:
           NODE_OPTIONS: --max-old-space-size=8192
+          CI_COMPAT_FROZEN_TARGET: ${{ needs.preflight.outputs.frozen_target }}
         run: |
           pnpm build
-          pnpm ui:build
+          # Frozen targets may predate the full build's UI phase.
+          if [[ "${CI_COMPAT_FROZEN_TARGET:-}" != "false" ]]; then
+            pnpm ui:build
+          fi
           node openclaw.mjs --help
           node openclaw.mjs status --json --timeout 1
           pnpm test:build:singleton
